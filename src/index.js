@@ -89,6 +89,42 @@ export default {
     }
     // ▲ 環境デッキ登録 (register_meta)
 
+    // ▼ 自分のデッキ登録 (register_mine)
+    if (url.searchParams.get("register_mine") === "true") {
+      if (request.method !== "POST") {
+        return new Response(
+          JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+          { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+
+      const body = await request.json();
+      const { id, name, cardList, concern } = body;
+
+      if (!id || !name || !cardList || !concern) {
+        return new Response(
+          JSON.stringify({ ok: false, error: "id/name/cardList/concernは全部必須やで" }),
+          { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+
+      const key = "deck:mine:" + id;
+      const existing = await env.KV.get(key);
+      if (existing) {
+        return new Response(
+          JSON.stringify({ ok: false, error: `id "${id}" は既に登録済みやで` }),
+          { status: 409, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+
+      await env.KV.put(key, JSON.stringify({ id, name, cardList, concern }));
+      return new Response(
+        JSON.stringify({ ok: true, saved: key }),
+        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
+    }
+    // ▲ 自分のデッキ登録 (register_mine)
+
     return new Response("ok", { headers: { "Content-Type": "text/plain", ...CORS_HEADERS } });
   }
 };
