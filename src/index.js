@@ -4,6 +4,47 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "Content-Type"
 };
 
+// ▼ cardList検証 (register_meta / register_mine 共通)
+// 公式8分類。各カテゴリは省略可（そのデッキで未使用なら書かなくてよい）だが、
+// 書く場合は必ず { cardId: string, count: number(1以上) } の配列にする。
+const CARD_LIST_CATEGORIES = [
+  "pokemon", "goods", "tools", "technical", "supporters", "stadiums", "energy", "aceSpec"
+];
+
+function validateCardList(cardList) {
+  if (!cardList || typeof cardList !== "object" || Array.isArray(cardList)) {
+    return "cardListはオブジェクト形式（カテゴリごとの配列）にしてな";
+  }
+
+  for (const key of Object.keys(cardList)) {
+    if (!CARD_LIST_CATEGORIES.includes(key)) {
+      return `cardListに未知のカテゴリ "${key}" が入ってるで（許可カテゴリ: ${CARD_LIST_CATEGORIES.join(", ")}）`;
+    }
+  }
+
+  for (const category of CARD_LIST_CATEGORIES) {
+    if (!(category in cardList)) continue;
+    const entries = cardList[category];
+    if (!Array.isArray(entries)) {
+      return `cardList.${category}は配列にしてな`;
+    }
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        return `cardList.${category}の要素は { cardId, count } の形にしてな`;
+      }
+      if (typeof entry.cardId !== "string" || entry.cardId.trim() === "") {
+        return `cardList.${category}にcardId（文字列）が無い要素があるで`;
+      }
+      if (typeof entry.count !== "number" || !Number.isInteger(entry.count) || entry.count < 1) {
+        return `cardList.${category}のcountは1以上の整数にしてな（cardId: ${entry.cardId}）`;
+      }
+    }
+  }
+
+  return null; // 問題なし
+}
+// ▲ cardList検証 (register_meta / register_mine 共通)
+
 export default {
   async fetch(request, env) {
     const BASE = "https://api.tcgdex.net/v2/ja";
@@ -72,6 +113,14 @@ export default {
         );
       }
 
+      const cardListError = validateCardList(cardList);
+      if (cardListError) {
+        return new Response(
+          JSON.stringify({ ok: false, error: cardListError }),
+          { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+
       const key = "deck:meta:" + id;
       const existing = await env.KV.get(key);
       if (existing) {
@@ -108,6 +157,14 @@ export default {
         );
       }
 
+      const cardListError = validateCardList(cardList);
+      if (cardListError) {
+        return new Response(
+          JSON.stringify({ ok: false, error: cardListError }),
+          { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+
       const key = "deck:mine:" + id;
       const existing = await env.KV.get(key);
       if (existing) {
@@ -124,39 +181,6 @@ export default {
       );
     }
     // ▲ 自分のデッキ登録 (register_mine)
-
-    // ▼ 環境デッキ一覧 (list_meta) ※id・nameのみの軽量一覧
-    if (url.searchParams.get("list_meta") === "true") {
-      const list = await env.KV.list({ prefix: "deck:meta:" });
-      const decks = await Promise.all(
-        list.keys.map(async (k) => {
-          const raw = await env.KV.get(k.name);
-          const { id, name } = JSON.parse(raw);
-          return { id, name };
-        })
-      );
-      return new Response(
-        JSON.stringify({ ok: true, decks }),
-        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-      );
-    }
-    // ▲ 環境デッキ一覧 (list_meta)
-
-    // ▼ 自分のデッキ一覧 (list_mine) ※中身込みで全部返す
-    if (url.searchParams.get("list_mine") === "true") {
-      const list = await env.KV.list({ prefix: "deck:mine:" });
-      const decks = await Promise.all(
-        list.keys.map(async (k) => {
-          const raw = await env.KV.get(k.name);
-          return JSON.parse(raw);
-        })
-      );
-      return new Response(
-        JSON.stringify({ ok: true, decks }),
-        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-      );
-    }
-    // ▲ 自分のデッキ一覧 (list_mine)
 
     return new Response("ok", { headers: { "Content-Type": "text/plain", ...CORS_HEADERS } });
   }
