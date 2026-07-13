@@ -215,6 +215,37 @@ export default {
     }
     // ▲ 自分のデッキ一覧 (list_mine)
 
+    // ▼ カード詳細取得 (get_card) ※遅延キャッシュ方式
+    // 1. card:{cardId} を先に確認して、あればそのまま返す
+    // 2. 無ければTCGdexのカード単体APIを直接叩き、結果をcard:{cardId}に保存してから返す
+    const getCardId = url.searchParams.get("get_card");
+    if (getCardId) {
+      const cacheKey = "card:" + getCardId;
+      const cached = await env.KV.get(cacheKey);
+      if (cached) {
+        return new Response(
+          JSON.stringify({ ok: true, cached: true, card: JSON.parse(cached) }),
+          { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+
+      const cardRes = await fetch(`${BASE}/cards/${getCardId}`);
+      if (!cardRes.ok) {
+        return new Response(
+          JSON.stringify({ ok: false, error: `cardId "${getCardId}" が見つからんかったで` }),
+          { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+
+      const cardData = await cardRes.json();
+      await env.KV.put(cacheKey, JSON.stringify(cardData));
+      return new Response(
+        JSON.stringify({ ok: true, cached: false, card: cardData }),
+        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
+    }
+    // ▲ カード詳細取得 (get_card)
+
     return new Response("ok", { headers: { "Content-Type": "text/plain", ...CORS_HEADERS } });
   }
 };
