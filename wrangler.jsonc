@@ -1,0 +1,8 @@
+{
+  "name": "pokeca-ai-worker",
+  "compatibility_date": "2026-07-13",
+  "main": "src/index.js",
+  "kv_namespaces": [
+    { "binding": "KV", "id": "4f949e71015541219d22b6f7475aed7d" }
+  ]
+}
