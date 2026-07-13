@@ -182,6 +182,39 @@ export default {
     }
     // ▲ 自分のデッキ登録 (register_mine)
 
+    // ▼ 環境デッキ一覧 (list_meta) ※id・nameのみの軽量一覧
+    if (url.searchParams.get("list_meta") === "true") {
+      const list = await env.KV.list({ prefix: "deck:meta:" });
+      const decks = await Promise.all(
+        list.keys.map(async (k) => {
+          const raw = await env.KV.get(k.name);
+          const { id, name } = JSON.parse(raw);
+          return { id, name };
+        })
+      );
+      return new Response(
+        JSON.stringify({ ok: true, decks }),
+        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
+    }
+    // ▲ 環境デッキ一覧 (list_meta)
+
+    // ▼ 自分のデッキ一覧 (list_mine) ※中身込みで全部返す
+    if (url.searchParams.get("list_mine") === "true") {
+      const list = await env.KV.list({ prefix: "deck:mine:" });
+      const decks = await Promise.all(
+        list.keys.map(async (k) => {
+          const raw = await env.KV.get(k.name);
+          return JSON.parse(raw);
+        })
+      );
+      return new Response(
+        JSON.stringify({ ok: true, decks }),
+        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
+    }
+    // ▲ 自分のデッキ一覧 (list_mine)
+
     return new Response("ok", { headers: { "Content-Type": "text/plain", ...CORS_HEADERS } });
   }
 };
