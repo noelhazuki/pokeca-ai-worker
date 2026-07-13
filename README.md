@@ -1,0 +1,2 @@
+# pokeca-ai-worker
+ポケカAI
