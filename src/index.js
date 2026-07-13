@@ -1,7 +1,18 @@
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type"
+};
+
 export default {
   async fetch(request, env) {
     const BASE = "https://api.tcgdex.net/v2/ja";
     const url = new URL(request.url);
+
+    // プリフライトリクエスト（OPTIONS）対応
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: CORS_HEADERS });
+    }
 
     // セット一覧を保存
     if (url.searchParams.get("init") === "true") {
@@ -12,7 +23,7 @@ export default {
       await env.KV.put("sync:progress", "0");
       return new Response(
         JSON.stringify({ ok: true, total: standardSets.length }),
-        { headers: { "Content-Type": "application/json" } }
+        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
 
@@ -26,7 +37,7 @@ export default {
       if (progress >= sets.length) {
         return new Response(
           JSON.stringify({ ok: true, status: "完了！", total: sets.length }),
-          { headers: { "Content-Type": "application/json" } }
+          { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
         );
       }
 
@@ -38,7 +49,7 @@ export default {
 
       return new Response(
         JSON.stringify({ ok: true, saved: set.id, progress: progress + 1, total: sets.length }),
-        { headers: { "Content-Type": "application/json" } }
+        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
 
@@ -47,7 +58,7 @@ export default {
       if (request.method !== "POST") {
         return new Response(
           JSON.stringify({ ok: false, error: "POSTで送ってな" }),
-          { status: 405, headers: { "Content-Type": "application/json" } }
+          { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
         );
       }
 
@@ -57,7 +68,7 @@ export default {
       if (!id || !name || !cardList || !howToPlay) {
         return new Response(
           JSON.stringify({ ok: false, error: "id/name/cardList/howToPlayは全部必須やで" }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
+          { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
         );
       }
 
@@ -66,18 +77,18 @@ export default {
       if (existing) {
         return new Response(
           JSON.stringify({ ok: false, error: `id "${id}" は既に登録済みやで` }),
-          { status: 409, headers: { "Content-Type": "application/json" } }
+          { status: 409, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
         );
       }
 
       await env.KV.put(key, JSON.stringify({ id, name, cardList, howToPlay }));
       return new Response(
         JSON.stringify({ ok: true, saved: key }),
-        { headers: { "Content-Type": "application/json" } }
+        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
     // ▲ 環境デッキ登録 (register_meta)
 
-    return new Response("ok", { headers: { "Content-Type": "text/plain" } });
+    return new Response("ok", { headers: { "Content-Type": "text/plain", ...CORS_HEADERS } });
   }
 };
