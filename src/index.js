@@ -320,6 +320,68 @@ if (url.searchParams.get("unlock_mine") === "true") {
 }
 // ▲ 自分のデッキ ロック解除 (unlock_mine)
 
+// ▼ 自分のデッキ コピー作成 (copy_mine)
+if (url.searchParams.get("copy_mine") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { sourceType, sourceId, newId, newName } = body;
+
+  if (!sourceType || !sourceId || !newId || !newName) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "sourceType/sourceId/newId/newNameは全部必須やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  if (sourceType !== "meta" && sourceType !== "mine") {
+    return new Response(
+      JSON.stringify({ ok: false, error: `sourceTypeは"meta"か"mine"のどっちかにしてな` }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const sourceKey = "deck:" + sourceType + ":" + sourceId;
+  const sourceRaw = await env.KV.get(sourceKey);
+  if (!sourceRaw) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `コピー元 "${sourceKey}" が見つからんかったで` }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const newKey = "deck:mine:" + newId;
+  const existing = await env.KV.get(newKey);
+  if (existing) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `id "${newId}" は既に登録済みやで` }),
+      { status: 409, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const source = JSON.parse(sourceRaw);
+  const newDeck = {
+    id: newId,
+    name: newName,
+    cardList: source.cardList,
+    concern: source.concern || "",
+    deckCode: "",
+    locked: false
+  };
+
+  await env.KV.put(newKey, JSON.stringify(newDeck));
+  return new Response(
+    JSON.stringify({ ok: true, saved: newKey }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ 自分のデッキ コピー作成 (copy_mine)
+
     // ▼ 環境デッキ一覧 (list_meta) ※id・nameのみの軽量一覧
     if (url.searchParams.get("list_meta") === "true") {
       const list = await env.KV.list({ prefix: "deck:meta:" });
