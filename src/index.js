@@ -106,7 +106,7 @@ export default {
       const body = await request.json();
       const { id, name, cardList, howToPlay } = body;
 
-      if (!id || !name || !cardList || !howToPlay) {
+      if (!id || !name || !cardList) {
         return new Response(
           JSON.stringify({ ok: false, error: "id/name/cardListは全部必須やで" }),
           { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
@@ -130,7 +130,7 @@ export default {
         );
       }
 
-await env.KV.put(key, JSON.stringify({ id, name, cardList, howToPlay }));
+await env.KV.put(key, JSON.stringify({ id, name, cardList, howToPlay: howToPlay || "" }));
       return new Response(
         JSON.stringify({ ok: true, saved: key }),
         { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
