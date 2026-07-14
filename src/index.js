@@ -281,6 +281,45 @@ if (url.searchParams.get("update_mine") === "true") {
 }
 // ▲ 自分のデッキ更新 (update_mine)
 
+// ▼ 自分のデッキ ロック解除 (unlock_mine)
+if (url.searchParams.get("unlock_mine") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { id } = body;
+
+  if (!id) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "idは必須やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const key = "deck:mine:" + id;
+  const raw = await env.KV.get(key);
+  if (!raw) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `id "${id}" は見つからんかったで` }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const existing = JSON.parse(raw);
+  existing.locked = false;
+  await env.KV.put(key, JSON.stringify(existing));
+
+  return new Response(
+    JSON.stringify({ ok: true, unlocked: key }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ 自分のデッキ ロック解除 (unlock_mine)
+
     // ▼ 環境デッキ一覧 (list_meta) ※id・nameのみの軽量一覧
     if (url.searchParams.get("list_meta") === "true") {
       const list = await env.KV.list({ prefix: "deck:meta:" });
