@@ -352,6 +352,43 @@ if (url.searchParams.get("unlock_mine") === "true") {
 }
 // ▲ 自分のデッキ ロック解除 (unlock_mine)
 
+// ▼ 自分のデッキ削除 (delete_mine)
+if (url.searchParams.get("delete_mine") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { id } = body;
+
+  if (!id) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "idは必須やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const key = "deck:mine:" + id;
+  const existing = await env.KV.get(key);
+  if (!existing) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `id "${id}" は見つからんかったで` }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  await env.KV.delete(key);
+  await env.KV.delete("deck:mine:backup:" + id); // バックアップキーがあれば一緒に消す
+  return new Response(
+    JSON.stringify({ ok: true, deleted: key }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ 自分のデッキ削除 (delete_mine)
+
 // ▼ 自分のデッキ コピー作成 (copy_mine)
 if (url.searchParams.get("copy_mine") === "true") {
   if (request.method !== "POST") {
