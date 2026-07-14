@@ -449,15 +449,17 @@ if (url.searchParams.get("copy_mine") === "true") {
     // ▼ 環境デッキ一覧 (list_meta) ※id・nameのみの軽量一覧
     if (url.searchParams.get("list_meta") === "true") {
       const list = await env.KV.list({ prefix: "deck:meta:" });
-      const decks = await Promise.all(
+      const raws = await Promise.all(
         list.keys
           .filter((k) => !k.name.slice("deck:meta:".length).includes(":"))
-          .map(async (k) => {
-          const raw = await env.KV.get(k.name);
+          .map((k) => env.KV.get(k.name))
+      );
+      const decks = raws
+        .filter((raw) => raw !== null) // 削除直後のKV反映ラグ対策
+        .map((raw) => {
           const { id, name } = JSON.parse(raw);
           return { id, name };
-        })
-      );
+        });
       return new Response(
         JSON.stringify({ ok: true, decks }),
         { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
@@ -468,14 +470,14 @@ if (url.searchParams.get("copy_mine") === "true") {
     // ▼ 自分のデッキ一覧 (list_mine) ※中身込みで全部返す
     if (url.searchParams.get("list_mine") === "true") {
       const list = await env.KV.list({ prefix: "deck:mine:" });
-      const decks = await Promise.all(
+      const raws = await Promise.all(
         list.keys
           .filter((k) => !k.name.slice("deck:mine:".length).includes(":"))
-          .map(async (k) => {
-          const raw = await env.KV.get(k.name);
-          return JSON.parse(raw);
-        })
+          .map((k) => env.KV.get(k.name))
       );
+      const decks = raws
+        .filter((raw) => raw !== null) // 削除直後のKV反映ラグ対策
+        .map((raw) => JSON.parse(raw));
       return new Response(
         JSON.stringify({ ok: true, decks }),
         { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
