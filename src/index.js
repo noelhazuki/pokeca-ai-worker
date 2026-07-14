@@ -108,7 +108,7 @@ export default {
 
       if (!id || !name || !cardList || !howToPlay) {
         return new Response(
-          JSON.stringify({ ok: false, error: "id/name/cardList/howToPlayは全部必須やで" }),
+          JSON.stringify({ ok: false, error: "id/name/cardListは全部必須やで" }),
           { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
         );
       }
@@ -130,7 +130,7 @@ export default {
         );
       }
 
-      await env.KV.put(key, JSON.stringify({ id, name, cardList, howToPlay }));
+await env.KV.put(key, JSON.stringify({ id, name, cardList, concern: concern || "" }));
       return new Response(
         JSON.stringify({ ok: true, saved: key }),
         { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
@@ -184,7 +184,7 @@ if (url.searchParams.get("delete_meta") === "true") {
       const body = await request.json();
       const { id, name, cardList, concern } = body;
 
-      if (!id || !name || !cardList || !concern) {
+      if (!id || !name || !cardList) {
         return new Response(
           JSON.stringify({ ok: false, error: "id/name/cardList/concernは全部必須やで" }),
           { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
