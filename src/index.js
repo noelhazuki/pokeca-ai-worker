@@ -45,6 +45,50 @@ function validateCardList(cardList) {
 }
 // ▲ cardList検証 (register_meta / register_mine 共通)
 
+// ▼ id連番発行 (register_meta / register_mine / copy_mine 共通)
+// counter:mine / counter:meta を読んで type-XXX（3桁ゼロ埋め）を組み立てる。
+// 実データと重複してたら+1してリトライし、確定した番号の次からKV上のカウンターを更新する。
+async function generateId(env, type) {
+  const counterKey = "counter:" + type;
+  let n = parseInt((await env.KV.get(counterKey)) || "1", 10);
+
+  let candidateId;
+  let key;
+  while (true) {
+    candidateId = type + "-" + String(n).padStart(3, "0");
+    key = "deck:" + type + ":" + candidateId;
+    const existing = await env.KV.get(key);
+    if (!existing) break;
+    n++;
+  }
+
+  await env.KV.put(counterKey, String(n + 1));
+  return candidateId;
+}
+// ▲ id連番発行
+
+// ▼ コピー時自動命名 (copy_mine専用) ※Windows方式「〇〇のコピー」「〇〇のコピー(2)」
+// mine側の既存デッキ名の中で、空いてる一番若い番号を採用する（削除で空いた番号は再利用）
+async function generateCopyName(env, sourceName) {
+  const list = await env.KV.list({ prefix: "deck:mine:" });
+  const names = new Set();
+  for (const k of list.keys) {
+    if (k.name.slice("deck:mine:".length).includes(":")) continue; // backupキー等は除外
+    const raw = await env.KV.get(k.name);
+    if (!raw) continue;
+    const d = JSON.parse(raw);
+    names.add(d.name);
+  }
+
+  const base = sourceName + "のコピー";
+  if (!names.has(base)) return base;
+
+  let n = 2;
+  while (names.has(base + "(" + n + ")")) n++;
+  return base + "(" + n + ")";
+}
+// ▲ コピー時自動命名
+
 export default {
   async fetch(request, env) {
     const BASE = "https://api.tcgdex.net/v2/ja";
@@ -104,11 +148,11 @@ export default {
       }
 
       const body = await request.json();
-      const { id, name, cardList, howToPlay } = body;
+      const { name, cardList, howToPlay } = body;
 
-      if (!id || !name || !cardList) {
+      if (!name || !cardList) {
         return new Response(
-          JSON.stringify({ ok: false, error: "id/name/cardListは全部必須やで" }),
+          JSON.stringify({ ok: false, error: "name/cardListは全部必須やで（idは自動採番されるから送らんでええ）" }),
           { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
         );
       }
@@ -121,18 +165,12 @@ export default {
         );
       }
 
+      const id = await generateId(env, "meta");
       const key = "deck:meta:" + id;
-      const existing = await env.KV.get(key);
-      if (existing) {
-        return new Response(
-          JSON.stringify({ ok: false, error: `id "${id}" は既に登録済みやで` }),
-          { status: 409, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-        );
-      }
 
-await env.KV.put(key, JSON.stringify({ id, name, cardList, howToPlay: howToPlay || "" }));
+      await env.KV.put(key, JSON.stringify({ id, name, cardList, howToPlay: howToPlay || "" }));
       return new Response(
-        JSON.stringify({ ok: true, saved: key }),
+        JSON.stringify({ ok: true, saved: key, id }),
         { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
@@ -182,11 +220,11 @@ if (url.searchParams.get("delete_meta") === "true") {
       }
 
       const body = await request.json();
-      const { id, name, cardList, concern } = body;
+      const { name, cardList, concern } = body;
 
-      if (!id || !name || !cardList) {
+      if (!name || !cardList) {
         return new Response(
-          JSON.stringify({ ok: false, error: "id/name/cardListは全部必須やで" }),
+          JSON.stringify({ ok: false, error: "name/cardListは全部必須やで（idは自動採番されるから送らんでええ）" }),
           { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
         );
       }
@@ -199,18 +237,12 @@ if (url.searchParams.get("delete_meta") === "true") {
         );
       }
 
+      const id = await generateId(env, "mine");
       const key = "deck:mine:" + id;
-      const existing = await env.KV.get(key);
-      if (existing) {
-        return new Response(
-          JSON.stringify({ ok: false, error: `id "${id}" は既に登録済みやで` }),
-          { status: 409, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-        );
-      }
 
-await env.KV.put(key, JSON.stringify({ id, name, cardList, concern: concern || "" }));
+      await env.KV.put(key, JSON.stringify({ id, name, cardList, concern: concern || "" }));
       return new Response(
-        JSON.stringify({ ok: true, saved: key }),
+        JSON.stringify({ ok: true, saved: key, id }),
         { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
@@ -330,11 +362,11 @@ if (url.searchParams.get("copy_mine") === "true") {
   }
 
   const body = await request.json();
-  const { sourceType, sourceId, newId, newName } = body;
+  const { sourceType, sourceId } = body;
 
-  if (!sourceType || !sourceId || !newId || !newName) {
+  if (!sourceType || !sourceId) {
     return new Response(
-      JSON.stringify({ ok: false, error: "sourceType/sourceId/newId/newNameは全部必須やで" }),
+      JSON.stringify({ ok: false, error: "sourceType/sourceIdは全部必須やで（newId/newNameは自動生成されるから送らんでええ）" }),
       { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   }
@@ -355,16 +387,11 @@ if (url.searchParams.get("copy_mine") === "true") {
     );
   }
 
-  const newKey = "deck:mine:" + newId;
-  const existing = await env.KV.get(newKey);
-  if (existing) {
-    return new Response(
-      JSON.stringify({ ok: false, error: `id "${newId}" は既に登録済みやで` }),
-      { status: 409, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-    );
-  }
-
   const source = JSON.parse(sourceRaw);
+  const newId = await generateId(env, "mine");
+  const newName = await generateCopyName(env, source.name);
+  const newKey = "deck:mine:" + newId;
+
   const newDeck = {
     id: newId,
     name: newName,
@@ -376,7 +403,7 @@ if (url.searchParams.get("copy_mine") === "true") {
 
   await env.KV.put(newKey, JSON.stringify(newDeck));
   return new Response(
-    JSON.stringify({ ok: true, saved: newKey }),
+    JSON.stringify({ ok: true, saved: newKey, id: newId, name: newName }),
     { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
   );
 }
