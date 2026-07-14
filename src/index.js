@@ -386,7 +386,9 @@ if (url.searchParams.get("copy_mine") === "true") {
     if (url.searchParams.get("list_meta") === "true") {
       const list = await env.KV.list({ prefix: "deck:meta:" });
       const decks = await Promise.all(
-        list.keys.map(async (k) => {
+        list.keys
+          .filter((k) => !k.name.slice("deck:meta:".length).includes(":"))
+          .map(async (k) => {
           const raw = await env.KV.get(k.name);
           const { id, name } = JSON.parse(raw);
           return { id, name };
@@ -403,7 +405,9 @@ if (url.searchParams.get("copy_mine") === "true") {
     if (url.searchParams.get("list_mine") === "true") {
       const list = await env.KV.list({ prefix: "deck:mine:" });
       const decks = await Promise.all(
-        list.keys.map(async (k) => {
+        list.keys
+          .filter((k) => !k.name.slice("deck:mine:".length).includes(":"))
+          .map(async (k) => {
           const raw = await env.KV.get(k.name);
           return JSON.parse(raw);
         })
