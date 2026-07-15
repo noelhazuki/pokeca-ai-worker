@@ -4,6 +4,8 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "Content-Type"
 };
 
+const TCGDEX_BASE = "https://api.tcgdex.net/v2/ja";
+
 // ▼ cardList検証 (register_meta / register_mine 共通)
 // 公式8分類。各カテゴリは省略可（そのデッキで未使用なら書かなくてよい）だが、
 // 書く場合は必ず { cardId: string, count: number(1以上) } の配列にする。
@@ -44,6 +46,69 @@ function validateCardList(cardList) {
   return null; // 問題なし
 }
 // ▲ cardList検証 (register_meta / register_mine 共通)
+
+// ▼ カード取得ヘルパー (get_card / validateRegulationLegality 共通) ※遅延キャッシュ方式
+// card:{cardId} があればそれを返す。無ければTCGdexのカード単体APIを叩いてKVに保存してから返す。
+async function getCardData(env, cardId) {
+  const cacheKey = "card:" + cardId;
+  const cached = await env.KV.get(cacheKey);
+  if (cached) {
+    return { card: JSON.parse(cached), cached: true };
+  }
+
+  const cardRes = await fetch(`${TCGDEX_BASE}/cards/${cardId}`);
+  if (!cardRes.ok) {
+    return { card: null, cached: false };
+  }
+
+  const cardData = await cardRes.json();
+  await env.KV.put(cacheKey, JSON.stringify(cardData));
+  return { card: cardData, cached: false };
+}
+// ▲ カード取得ヘルパー
+
+// ▼ レギュレーション適合チェック (register_meta / register_mine / update_mine 共通)
+// 判定フロー：
+// 1. card.regulationMarkが無い（基本エネルギー等）→常時OK
+// 2. regulationMarkが現行合法マーク(regulation:current:legalMarks)に含まれる→OK
+// 3. 含まれない場合、カード名がホワイトリスト(regulation:{id}:legalNameWhitelist)にあれば救済OK
+// 4. どちらにも当てはまらなければ違反としてviolationsに積む（1個で止めず全部まとめて返す）
+const REGULATION_ID = "regulation:2026H"; // レギュ改定単位のid。命名規則は次回以降検討
+const LEGAL_MARKS_KEY = "regulation:current:legalMarks";
+
+async function validateRegulationLegality(cardList, env) {
+  const legalMarksRaw = await env.KV.get(LEGAL_MARKS_KEY);
+  const legalMarks = legalMarksRaw ? JSON.parse(legalMarksRaw) : [];
+
+  const whitelistRaw = await env.KV.get(REGULATION_ID + ":legalNameWhitelist");
+  const whitelist = whitelistRaw ? JSON.parse(whitelistRaw) : [];
+
+  const violations = [];
+
+  for (const category of CARD_LIST_CATEGORIES) {
+    const entries = cardList[category];
+    if (!entries) continue;
+
+    for (const entry of entries) {
+      const { card } = await getCardData(env, entry.cardId);
+
+      if (!card) {
+        violations.push({ category, cardId: entry.cardId, reason: "card_not_found" });
+        continue;
+      }
+
+      const mark = card.regulationMark;
+      if (!mark) continue; // 基本エネルギー等マーク非印字カードは常時合法
+      if (legalMarks.includes(mark)) continue; // マークOK
+      if (whitelist.includes(card.name)) continue; // 名前ベースの救済でOK
+
+      violations.push({ category, cardId: entry.cardId, name: card.name, mark, reason: "regulation_violation" });
+    }
+  }
+
+  return { valid: violations.length === 0, violations };
+}
+// ▲ レギュレーション適合チェック
 
 // ▼ id連番発行 (register_meta / register_mine / copy_mine 共通)
 // counter:mine / counter:meta を読んで type-XXX（3桁ゼロ埋め）を組み立てる。
@@ -91,7 +156,6 @@ async function generateCopyName(env, sourceName) {
 
 export default {
   async fetch(request, env) {
-    const BASE = "https://api.tcgdex.net/v2/ja";
     const url = new URL(request.url);
 
     // プリフライトリクエスト（OPTIONS）対応
@@ -101,7 +165,7 @@ export default {
 
     // セット一覧を保存
     if (url.searchParams.get("init") === "true") {
-      const setsRes = await fetch(`${BASE}/sets`);
+      const setsRes = await fetch(`${TCGDEX_BASE}/sets`);
       const sets = await setsRes.json();
       const standardSets = sets.filter(s => s.id.startsWith("SV"));
       await env.KV.put("sets:standard", JSON.stringify(standardSets));
@@ -127,7 +191,7 @@ export default {
       }
 
       const set = sets[progress];
-      const setRes = await fetch(`${BASE}/sets/${set.id}`);
+      const setRes = await fetch(`${TCGDEX_BASE}/sets/${set.id}`);
       const setData = await setRes.json();
       await env.KV.put("set:" + set.id, JSON.stringify(setData));
       await env.KV.put("sync:progress", String(progress + 1));
@@ -161,6 +225,14 @@ export default {
       if (cardListError) {
         return new Response(
           JSON.stringify({ ok: false, error: cardListError }),
+          { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+
+      const regulationResult = await validateRegulationLegality(cardList, env);
+      if (!regulationResult.valid) {
+        return new Response(
+          JSON.stringify({ ok: false, error: "regulation_violation", violations: regulationResult.violations }),
           { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
         );
       }
@@ -210,62 +282,6 @@ if (url.searchParams.get("delete_meta") === "true") {
   );
 }
 // ▲ 環境デッキ削除 (delete_meta)
-// ▼ 環境デッキ更新 (update_meta)
-if (url.searchParams.get("update_meta") === "true") {
-  if (request.method !== "POST") {
-    return new Response(
-      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
-      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-    );
-  }
-
-  const body = await request.json();
-  const { id } = body;
-
-  if (!id) {
-    return new Response(
-      JSON.stringify({ ok: false, error: "idは必須やで" }),
-      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-    );
-  }
-
-  const key = "deck:meta:" + id;
-  const raw = await env.KV.get(key);
-  if (!raw) {
-    return new Response(
-      JSON.stringify({ ok: false, error: `id "${id}" は見つからんかったで` }),
-      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-    );
-  }
-
-  const existing = JSON.parse(raw);
-
-  // 送られてきた項目だけ上書き（キーが存在するかどうかで判定）
-  const updatable = ["name", "cardList", "howToPlay", "deckCode"];
-  const merged = { ...existing };
-  for (const field of updatable) {
-    if (field in body) {
-      merged[field] = body[field];
-    }
-  }
-
-  if ("cardList" in body) {
-    const cardListError = validateCardList(merged.cardList);
-    if (cardListError) {
-      return new Response(
-        JSON.stringify({ ok: false, error: cardListError }),
-        { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-      );
-    }
-  }
-
-  await env.KV.put(key, JSON.stringify(merged));
-  return new Response(
-    JSON.stringify({ ok: true, updated: key }),
-    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-  );
-}
-// ▲ 環境デッキ更新 (update_meta)
     // ▼ 自分のデッキ登録 (register_mine)
     if (url.searchParams.get("register_mine") === "true") {
       if (request.method !== "POST") {
@@ -289,6 +305,14 @@ if (url.searchParams.get("update_meta") === "true") {
       if (cardListError) {
         return new Response(
           JSON.stringify({ ok: false, error: cardListError }),
+          { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+
+      const regulationResult = await validateRegulationLegality(cardList, env);
+      if (!regulationResult.valid) {
+        return new Response(
+          JSON.stringify({ ok: false, error: "regulation_violation", violations: regulationResult.violations }),
           { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
         );
       }
@@ -353,6 +377,14 @@ if (url.searchParams.get("update_mine") === "true") {
     if (cardListError) {
       return new Response(
         JSON.stringify({ ok: false, error: cardListError }),
+        { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
+    }
+
+    const regulationResult = await validateRegulationLegality(merged.cardList, env);
+    if (!regulationResult.valid) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "regulation_violation", violations: regulationResult.violations }),
         { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
@@ -546,31 +578,40 @@ if (url.searchParams.get("copy_mine") === "true") {
     // 2. 無ければTCGdexのカード単体APIを直接叩き、結果をcard:{cardId}に保存してから返す
     const getCardId = url.searchParams.get("get_card");
     if (getCardId) {
-      const cacheKey = "card:" + getCardId;
-      const cached = await env.KV.get(cacheKey);
-      if (cached) {
-        return new Response(
-          JSON.stringify({ ok: true, cached: true, card: JSON.parse(cached) }),
-          { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-        );
-      }
-
-      const cardRes = await fetch(`${BASE}/cards/${getCardId}`);
-      if (!cardRes.ok) {
+      const { card, cached } = await getCardData(env, getCardId);
+      if (!card) {
         return new Response(
           JSON.stringify({ ok: false, error: `cardId "${getCardId}" が見つからんかったで` }),
           { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
         );
       }
-
-      const cardData = await cardRes.json();
-      await env.KV.put(cacheKey, JSON.stringify(cardData));
       return new Response(
-        JSON.stringify({ ok: true, cached: false, card: cardData }),
+        JSON.stringify({ ok: true, cached, card }),
         { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
     // ▲ カード詳細取得 (get_card)
+
+    // ▼ 新弾差分確認 (check_set) ※新弾ロード運用フローのステップ2、都度TCGdexへ直接照会（キャッシュ無し）
+    if (url.searchParams.get("check_set") === "true") {
+      const setsRes = await fetch(`${TCGDEX_BASE}/sets`);
+      const allSets = await setsRes.json();
+      const standardSets = allSets.filter(s => s.id.startsWith("SV"));
+
+      const existingRaw = await env.KV.get("sets:standard");
+      const existing = existingRaw ? JSON.parse(existingRaw) : [];
+      const existingIds = new Set(existing.map(s => s.id));
+
+      const newSets = standardSets
+        .filter(s => !existingIds.has(s.id))
+        .map(s => ({ id: s.id, name: s.name }));
+
+      return new Response(
+        JSON.stringify({ ok: true, newSets, checkedAt: new Date().toISOString() }),
+        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
+    }
+    // ▲ 新弾差分確認 (check_set)
 
     return new Response("ok", { headers: { "Content-Type": "text/plain", ...CORS_HEADERS } });
   }
