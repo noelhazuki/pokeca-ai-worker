@@ -148,7 +148,7 @@ export default {
       }
 
       const body = await request.json();
-      const { name, cardList, howToPlay } = body;
+      const { name, cardList, howToPlay, deckCode } = body;
 
       if (!name || !cardList) {
         return new Response(
@@ -168,7 +168,7 @@ export default {
       const id = await generateId(env, "meta");
       const key = "deck:meta:" + id;
 
-      await env.KV.put(key, JSON.stringify({ id, name, cardList, howToPlay: howToPlay || "" }));
+      await env.KV.put(key, JSON.stringify({ id, name, cardList, howToPlay: howToPlay || "", deckCode: deckCode || "" }));
       return new Response(
         JSON.stringify({ ok: true, saved: key, id }),
         { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
@@ -210,6 +210,62 @@ if (url.searchParams.get("delete_meta") === "true") {
   );
 }
 // ▲ 環境デッキ削除 (delete_meta)
+// ▼ 環境デッキ更新 (update_meta)
+if (url.searchParams.get("update_meta") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { id } = body;
+
+  if (!id) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "idは必須やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const key = "deck:meta:" + id;
+  const raw = await env.KV.get(key);
+  if (!raw) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `id "${id}" は見つからんかったで` }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const existing = JSON.parse(raw);
+
+  // 送られてきた項目だけ上書き（キーが存在するかどうかで判定）
+  const updatable = ["name", "cardList", "howToPlay", "deckCode"];
+  const merged = { ...existing };
+  for (const field of updatable) {
+    if (field in body) {
+      merged[field] = body[field];
+    }
+  }
+
+  if ("cardList" in body) {
+    const cardListError = validateCardList(merged.cardList);
+    if (cardListError) {
+      return new Response(
+        JSON.stringify({ ok: false, error: cardListError }),
+        { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
+    }
+  }
+
+  await env.KV.put(key, JSON.stringify(merged));
+  return new Response(
+    JSON.stringify({ ok: true, updated: key }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ 環境デッキ更新 (update_meta)
     // ▼ 自分のデッキ登録 (register_mine)
     if (url.searchParams.get("register_mine") === "true") {
       if (request.method !== "POST") {
@@ -457,8 +513,8 @@ if (url.searchParams.get("copy_mine") === "true") {
       const decks = raws
         .filter((raw) => raw !== null) // 削除直後のKV反映ラグ対策
         .map((raw) => {
-          const { id, name } = JSON.parse(raw);
-          return { id, name };
+          const { id, name, deckCode } = JSON.parse(raw);
+          return { id, name, deckCode: deckCode || "" };
         });
       return new Response(
         JSON.stringify({ ok: true, decks }),
