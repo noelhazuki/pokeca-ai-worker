@@ -612,7 +612,34 @@ if (url.searchParams.get("copy_mine") === "true") {
       );
     }
     // ▲ 新弾差分確認 (check_set)
+// ▼ レギュ再チェック一括 (recheck_all) ※読み取り専用、meta/mine両方対象
+if (url.searchParams.get("recheck_all") === "true") {
+  const results = [];
 
+  for (const type of ["meta", "mine"]) {
+    const list = await env.KV.list({ prefix: "deck:" + type + ":" });
+    const raws = await Promise.all(
+      list.keys
+        .filter((k) => !k.name.slice(("deck:" + type + ":").length).includes(":"))
+        .map((k) => env.KV.get(k.name))
+    );
+
+    for (const raw of raws) {
+      if (!raw) continue;
+      const deck = JSON.parse(raw);
+      const regulationResult = await validateRegulationLegality(deck.cardList, env);
+      if (!regulationResult.valid) {
+        results.push({ type, id: deck.id, name: deck.name, violations: regulationResult.violations });
+      }
+    }
+  }
+
+  return new Response(
+    JSON.stringify({ ok: true, results, checkedAt: new Date().toISOString() }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ レギュ再チェック一括 (recheck_all)
     return new Response("ok", { headers: { "Content-Type": "text/plain", ...CORS_HEADERS } });
   }
 };
