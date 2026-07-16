@@ -4,5 +4,8 @@
   "main": "src/index.js",
   "kv_namespaces": [
     { "binding": "KV", "id": "4f949e71015541219d22b6f7475aed7d" }
+  ],
+  "services": [
+    { "binding": "POKEKA2", "service": "pokeka2" }
   ]
 }
