@@ -47,6 +47,16 @@ function validateCardList(cardList) {
 }
 // ▲ cardList検証 (register_meta / register_mine 共通)
 
+// ▼ setInfo→TCGdex id変換 (resolve_card_id専用)
+// 例：「SV11W 043/086」→スペースをハイフンに置換→「/」より前だけ取る→「SV11W-043」
+function convertSetInfoToCardId(setInfo) {
+  if (typeof setInfo !== "string" || setInfo.trim() === "") return null;
+  const replaced = setInfo.replace(/ /g, "-");
+  const cardId = replaced.split("/")[0];
+  return cardId || null;
+}
+// ▲ setInfo→TCGdex id変換
+
 // ▼ カード取得ヘルパー (get_card / validateRegulationLegality 共通) ※遅延キャッシュ方式
 // card:{cardId} があればそれを返す。無ければTCGdexのカード単体APIを叩いてKVに保存してから返す。
 async function getCardData(env, cardId) {
@@ -591,6 +601,34 @@ if (url.searchParams.get("copy_mine") === "true") {
       );
     }
     // ▲ カード詳細取得 (get_card)
+
+// ▼ setInfo→TCGdex id変換テスト (resolve_card_id) ※動作確認用、register_meta本体への組み込みは次ステップ
+const resolveSetInfo = url.searchParams.get("resolve_card_id");
+if (resolveSetInfo) {
+  const candidateId = convertSetInfoToCardId(resolveSetInfo);
+
+  if (!candidateId) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "setInfoが空か形式が不正やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const { card, cached } = await getCardData(env, candidateId);
+
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      setInfo: resolveSetInfo,
+      candidateId,
+      matched: !!card,
+      cached,
+      card: card || null
+    }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ setInfo→TCGdex id変換テスト (resolve_card_id)
 
     // ▼ 新弾差分確認 (check_set) ※新弾ロード運用フローのステップ2、都度TCGdexへ直接照会（キャッシュ無し）
     if (url.searchParams.get("check_set") === "true") {
