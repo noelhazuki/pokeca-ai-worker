@@ -84,6 +84,27 @@ async function getCardData(env, cardId) {
 }
 // ▲ カード取得ヘルパー
 
+// ▼ セット取得ヘルパー (トレーナーズ・エネの名前照合専用) ※遅延キャッシュ方式
+// set:{setId} があればそれを返す。無ければTCGdexのセット単体APIを叩いてKVに保存してから返す。
+// getCardDataと同じ遅延キャッシュ方式。cards配列（id/localId/name）を使って名前照合する。
+async function getSetData(env, setId) {
+  const cacheKey = "set:" + setId;
+  const cached = await env.KV.get(cacheKey);
+  if (cached) {
+    return { set: JSON.parse(cached), cached: true };
+  }
+
+  const setRes = await fetch(`${TCGDEX_BASE}/sets/${setId}`);
+  if (!setRes.ok) {
+    return { set: null, cached: false };
+  }
+
+  const setData = await setRes.json();
+  await env.KV.put(cacheKey, JSON.stringify(setData));
+  return { set: setData, cached: false };
+}
+// ▲ セット取得ヘルパー
+
 // ▼ pokeka2カテゴリ→内部カテゴリ変換 (resolveCardList専用)
 // pokeka2の生データはcategoryが日本語文字列。ここに無いカテゴリが来たら
 // unmappedCategoriesとして別出しし、cardListには含めない（未対応分をハノイさんに判断してもらう）
@@ -97,11 +118,28 @@ const POKEKA2_CATEGORY_MAP = {
 };
 // ▲ pokeka2カテゴリ→内部カテゴリ変換
 
+// ▼ トレーナーズ・エネ名前照合 (resolveCardList専用)
+// pokeka2はトレーナーズ・エネにsetInfo（カード番号）を持たせてくれへん（公式サイト側の仕様、
+// pokeka2の抽出漏れやないことは実HTML確認済み）。代わりに画像パスから取れるsetCodeと、
+// カード名の完全一致でTCGdexのセット内カードリストから照合する。
+// setCodeが無い、または"ENE"（公式サイト内部の管理用フォルダ名でTCGdexには存在せんコード）の
+// 場合は最初から照合を諦めてnullを返す。
+async function matchTrainerOrEnergyCard(item, env) {
+  if (!item.setCode || item.setCode === "ENE") return null;
+
+  const { set } = await getSetData(env, item.setCode);
+  if (!set || !Array.isArray(set.cards)) return null;
+
+  const matches = set.cards.filter((c) => c.name === item.name);
+  if (matches.length !== 1) return null;
+
+  return matches[0].id;
+}
+// ▲ トレーナーズ・エネ名前照合
+
 // ▼ pokeka2生データ→cardList変換 (resolve_cardlist専用)
-// ポケモンカードのみsetInfo→cardId変換してTCGdex照合。マッチすれば確定{cardId,count}、
-// マッチしなければ仮登録{provisional:true,tempName,count}にする。
-// トレーナーズ・エネルギーは照合方式（名前検索 or setInfo直接）が未確定のため、
-// 現状は全件仮登録{provisional:true,tempName,count}のまま素通しする。
+// ポケモンはsetInfo→cardId変換、トレーナーズ・エネはsetCode+名前一致でTCGdex照合。
+// マッチすれば確定{cardId,count}、マッチしなければ仮登録{provisional:true,tempName,count}にする。
 async function resolveCardList(pokeka2Data, env) {
   const cardList = {};
   const unmappedCategories = [];
@@ -125,7 +163,13 @@ async function resolveCardList(pokeka2Data, env) {
         cardList[internalCategory].push({ provisional: true, tempName: item.name, count: item.count });
       }
     } else {
-      cardList[internalCategory].push({ provisional: true, tempName: item.name, count: item.count });
+      const cardId = await matchTrainerOrEnergyCard(item, env);
+
+      if (cardId) {
+        cardList[internalCategory].push({ cardId, count: item.count });
+      } else {
+        cardList[internalCategory].push({ provisional: true, tempName: item.name, count: item.count });
+      }
     }
   }
 
