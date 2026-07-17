@@ -32,13 +32,20 @@ function validateCardList(cardList) {
     }
     for (const entry of entries) {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-        return `cardList.${category}の要素は { cardId, count } の形にしてな`;
+        return `cardList.${category}の要素は { cardId, count } か { provisional, tempName, count }（仮登録）の形にしてな`;
+      }
+      if (typeof entry.count !== "number" || !Number.isInteger(entry.count) || entry.count < 1) {
+        return `cardList.${category}のcountは1以上の整数にしてな`;
+      }
+      // 仮登録エントリー（TCGdex未収録 or 照合未実施）：cardId無し、tempNameのみ必須
+      if (entry.provisional === true) {
+        if (typeof entry.tempName !== "string" || entry.tempName.trim() === "") {
+          return `cardList.${category}の仮登録要素にtempName（文字列）が無いで`;
+        }
+        continue;
       }
       if (typeof entry.cardId !== "string" || entry.cardId.trim() === "") {
         return `cardList.${category}にcardId（文字列）が無い要素があるで`;
-      }
-      if (typeof entry.count !== "number" || !Number.isInteger(entry.count) || entry.count < 1) {
-        return `cardList.${category}のcountは1以上の整数にしてな（cardId: ${entry.cardId}）`;
       }
     }
   }
@@ -76,6 +83,55 @@ async function getCardData(env, cardId) {
   return { card: cardData, cached: false };
 }
 // ▲ カード取得ヘルパー
+
+// ▼ pokeka2カテゴリ→内部カテゴリ変換 (resolveCardList専用)
+// pokeka2の生データはcategoryが日本語文字列。ここに無いカテゴリが来たら
+// unmappedCategoriesとして別出しし、cardListには含めない（未対応分をハノイさんに判断してもらう）
+const POKEKA2_CATEGORY_MAP = {
+  "ポケモン": "pokemon",
+  "グッズ": "goods",
+  "ポケモンのどうぐ": "tools",
+  "サポート": "supporters",
+  "スタジアム": "stadiums",
+  "エネルギー": "energy"
+};
+// ▲ pokeka2カテゴリ→内部カテゴリ変換
+
+// ▼ pokeka2生データ→cardList変換 (resolve_cardlist専用)
+// ポケモンカードのみsetInfo→cardId変換してTCGdex照合。マッチすれば確定{cardId,count}、
+// マッチしなければ仮登録{provisional:true,tempName,count}にする。
+// トレーナーズ・エネルギーは照合方式（名前検索 or setInfo直接）が未確定のため、
+// 現状は全件仮登録{provisional:true,tempName,count}のまま素通しする。
+async function resolveCardList(pokeka2Data, env) {
+  const cardList = {};
+  const unmappedCategories = [];
+
+  for (const item of pokeka2Data.cards) {
+    const internalCategory = POKEKA2_CATEGORY_MAP[item.category];
+    if (!internalCategory) {
+      unmappedCategories.push(item.category);
+      continue;
+    }
+
+    if (!cardList[internalCategory]) cardList[internalCategory] = [];
+
+    if (internalCategory === "pokemon") {
+      const candidateId = convertSetInfoToCardId(item.setInfo);
+      const { card } = candidateId ? await getCardData(env, candidateId) : { card: null };
+
+      if (card) {
+        cardList[internalCategory].push({ cardId: candidateId, count: item.count });
+      } else {
+        cardList[internalCategory].push({ provisional: true, tempName: item.name, count: item.count });
+      }
+    } else {
+      cardList[internalCategory].push({ provisional: true, tempName: item.name, count: item.count });
+    }
+  }
+
+  return { cardList, unmappedCategories: [...new Set(unmappedCategories)] };
+}
+// ▲ pokeka2生データ→cardList変換
 
 // ▼ レギュレーション適合チェック (register_meta / register_mine / update_mine 共通)
 // 判定フロー：
@@ -629,6 +685,46 @@ if (resolveSetInfo) {
   );
 }
 // ▲ setInfo→TCGdex id変換テスト (resolve_card_id)
+
+// ▼ deckCode→cardList変換 (resolve_cardlist) ※register_metaのcardList入力フロー統合用
+// deckCodeを受け取り、POKEKA2 Service Binding経由でpokeka2を呼び出して生データを取得。
+// resolveCardList()でポケモンのみTCGdex照合、トレーナーズ・エネはpassthroughで仮登録にして返す。
+// この時点ではKVには保存しない（register_metaへの入力材料を返すだけ）。
+if (url.searchParams.get("resolve_cardlist") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { deckCode } = body;
+
+  if (!deckCode) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "deckCodeは必須やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const pokeka2Res = await env.POKEKA2.fetch(`https://pokeka2.internal/?code=${encodeURIComponent(deckCode)}`);
+  if (!pokeka2Res.ok) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `pokeka2の呼び出しに失敗したで（status: ${pokeka2Res.status}）` }),
+      { status: 502, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const pokeka2Data = await pokeka2Res.json();
+  const { cardList, unmappedCategories } = await resolveCardList(pokeka2Data, env);
+
+  return new Response(
+    JSON.stringify({ ok: true, deckCode, cardList, unmappedCategories }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ deckCode→cardList変換 (resolve_cardlist)
 
     // ▼ 新弾差分確認 (check_set) ※新弾ロード運用フローのステップ2、都度TCGdexへ直接照会（キャッシュ無し）
     if (url.searchParams.get("check_set") === "true") {
