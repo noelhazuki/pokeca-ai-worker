@@ -441,6 +441,44 @@ if (url.searchParams.get("copy_meta") === "true") {
   );
 }
 // ▲ 環境デッキ コピー作成 (copy_meta)
+// ▼ 環境デッキ 回し方メモ更新 (update_meta_howtoplay) ※howToPlayのみ書き換え、cardList等は不可
+if (url.searchParams.get("update_meta_howtoplay") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { id, howToPlay } = body;
+
+  if (!id || typeof howToPlay !== "string") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "id・howToPlayは両方必須やで（howToPlayは文字列で）" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const key = "deck:meta:" + id;
+  const raw = await env.KV.get(key);
+  if (!raw) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `"${key}" が見つからんかったで` }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const deck = JSON.parse(raw);
+  deck.howToPlay = howToPlay;
+
+  await env.KV.put(key, JSON.stringify(deck));
+  return new Response(
+    JSON.stringify({ ok: true, saved: key, howToPlay: deck.howToPlay }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ 環境デッキ 回し方メモ更新 (update_meta_howtoplay)
     // ▼ 自分のデッキ登録 (register_mine)
     if (url.searchParams.get("register_mine") === "true") {
       if (request.method !== "POST") {
