@@ -160,7 +160,8 @@ async function resolveCardList(pokeka2Data, env) {
       if (card) {
         cardList[internalCategory].push({ cardId: candidateId, count: item.count });
       } else {
-        cardList[internalCategory].push({ provisional: true, tempName: item.name, count: item.count });
+        // 再照合用にsetInfo（元の公式カード番号表記）も保持しておく（recheck_provisionalで使用）
+        cardList[internalCategory].push({ provisional: true, tempName: item.name, count: item.count, setInfo: item.setInfo || null });
       }
     } else {
       const cardId = await matchTrainerOrEnergyCard(item, env);
@@ -168,7 +169,8 @@ async function resolveCardList(pokeka2Data, env) {
       if (cardId) {
         cardList[internalCategory].push({ cardId, count: item.count });
       } else {
-        cardList[internalCategory].push({ provisional: true, tempName: item.name, count: item.count });
+        // 再照合用にsetCode（元の画像パス由来コード）も保持しておく（recheck_provisionalで使用）
+        cardList[internalCategory].push({ provisional: true, tempName: item.name, count: item.count, setCode: item.setCode || null });
       }
     }
   }
@@ -654,6 +656,84 @@ if (url.searchParams.get("unlock_mine") === "true") {
   );
 }
 // ▲ 自分のデッキ ロック解除 (unlock_mine)
+
+// ▼ 自分のデッキ provisional一括再チェック (recheck_mine)
+// cardList内のprovisionalエントリー（tempName＋setInfo/setCode保持分のみ）を、
+// resolveCardListと同じ照合ロジックでTCGdexへ再照合。ヒットすればconfirmed（{cardId,count}）へ昇格。
+// ロック中のデッキでも実行可（中身の構成・枚数は変えず、既存カードの正体確定のみのため）。
+// setInfo/setCoreを持たない古いprovisional（この機能実装前に登録されたもの）は再照合できずスキップされる。
+if (url.searchParams.get("recheck_mine") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { id } = body;
+
+  if (!id) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "idは必須やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const key = "deck:mine:" + id;
+  const raw = await env.KV.get(key);
+  if (!raw) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `id "${id}" は見つからんかったで` }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const existing = JSON.parse(raw);
+  let upgraded = 0;
+  let stillProvisional = 0;
+  let skipped = 0; // setInfo/setCode無しで再照合しようがない古いprovisional
+
+  for (const category of CARD_LIST_CATEGORIES) {
+    if (!Array.isArray(existing.cardList?.[category])) continue;
+
+    for (let i = 0; i < existing.cardList[category].length; i++) {
+      const entry = existing.cardList[category][i];
+      if (entry.provisional !== true) continue;
+
+      let matchedCardId = null;
+
+      if (category === "pokemon") {
+        if (!entry.setInfo) { skipped++; continue; }
+        const candidateId = convertSetInfoToCardId(entry.setInfo);
+        const { card } = candidateId ? await getCardData(env, candidateId) : { card: null };
+        if (card) matchedCardId = candidateId;
+      } else {
+        if (!entry.setCode) { skipped++; continue; }
+        matchedCardId = await matchTrainerOrEnergyCard({ setCode: entry.setCode, name: entry.tempName }, env);
+      }
+
+      if (matchedCardId) {
+        existing.cardList[category][i] = { cardId: matchedCardId, count: entry.count };
+        upgraded++;
+      } else {
+        stillProvisional++;
+      }
+    }
+  }
+
+  if (upgraded > 0) {
+    // 更新直前に1世代だけバックアップ退避（update_mineと同じ方式）
+    await env.KV.put("deck:mine:backup:" + id, raw);
+    await env.KV.put(key, JSON.stringify(existing));
+  }
+
+  return new Response(
+    JSON.stringify({ ok: true, id, upgraded, stillProvisional, skipped }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ 自分のデッキ provisional一括再チェック (recheck_mine)
 
 // ▼ 自分のデッキ削除 (delete_mine)
 if (url.searchParams.get("delete_mine") === "true") {
