@@ -479,7 +479,25 @@ if (url.searchParams.get("update_meta_howtoplay") === "true") {
   );
 }
 // ▲ 環境デッキ 回し方メモ更新 (update_meta_howtoplay)
-    // ▼ 自分のデッキ登録 (register_mine)
+  // ▼ 環境デッキ 回し方メモ取得 (get_meta_howtoplay) ※編集パネル表示用の単体取得
+const getMetaHowToPlayId = url.searchParams.get("get_meta_howtoplay");
+if (getMetaHowToPlayId) {
+  const key = "deck:meta:" + getMetaHowToPlayId;
+  const raw = await env.KV.get(key);
+  if (!raw) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `"${key}" が見つからんかったで` }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+  const deck = JSON.parse(raw);
+  return new Response(
+    JSON.stringify({ ok: true, id: deck.id, howToPlay: deck.howToPlay || "" }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ 環境デッキ 回し方メモ取得 (get_meta_howtoplay)
+// ▼ 自分のデッキ登録 (register_mine)
     if (url.searchParams.get("register_mine") === "true") {
       if (request.method !== "POST") {
         return new Response(
