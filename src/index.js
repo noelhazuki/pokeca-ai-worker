@@ -242,13 +242,14 @@ async function generateId(env, type) {
 }
 // ▲ id連番発行
 
-// ▼ コピー時自動命名 (copy_mine専用) ※Windows方式「〇〇のコピー」「〇〇のコピー(2)」
-// mine側の既存デッキ名の中で、空いてる一番若い番号を採用する（削除で空いた番号は再利用）
-async function generateCopyName(env, sourceName) {
-  const list = await env.KV.list({ prefix: "deck:mine:" });
+// ▼ コピー時自動命名 (copy_mine / copy_meta 共通) ※Windows方式「〇〇のコピー」「〇〇のコピー(2)」
+// type（"mine" or "meta"）側の既存デッキ名の中で、空いてる一番若い番号を採用する（削除で空いた番号は再利用）
+async function generateCopyName(env, sourceName, type) {
+  const prefix = "deck:" + type + ":";
+  const list = await env.KV.list({ prefix });
   const names = new Set();
   for (const k of list.keys) {
-    if (k.name.slice("deck:mine:".length).includes(":")) continue; // backupキー等は除外
+    if (k.name.slice(prefix.length).includes(":")) continue; // backupキー等は除外
     const raw = await env.KV.get(k.name);
     if (!raw) continue;
     const d = JSON.parse(raw);
@@ -392,6 +393,54 @@ if (url.searchParams.get("delete_meta") === "true") {
   );
 }
 // ▲ 環境デッキ削除 (delete_meta)
+// ▼ 環境デッキ コピー作成 (copy_meta)
+if (url.searchParams.get("copy_meta") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { sourceId } = body;
+
+  if (!sourceId) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "sourceIdは必須やで（newId/newNameは自動生成されるから送らんでええ）" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const sourceKey = "deck:meta:" + sourceId;
+  const sourceRaw = await env.KV.get(sourceKey);
+  if (!sourceRaw) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `コピー元 "${sourceKey}" が見つからんかったで` }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const source = JSON.parse(sourceRaw);
+  const newId = await generateId(env, "meta");
+  const newName = await generateCopyName(env, source.name, "meta");
+  const newKey = "deck:meta:" + newId;
+
+  const newDeck = {
+    id: newId,
+    name: newName,
+    cardList: source.cardList,
+    howToPlay: source.howToPlay || "",
+    deckCode: source.deckCode || ""
+  };
+
+  await env.KV.put(newKey, JSON.stringify(newDeck));
+  return new Response(
+    JSON.stringify({ ok: true, saved: newKey, id: newId, name: newName }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ 環境デッキ コピー作成 (copy_meta)
     // ▼ 自分のデッキ登録 (register_mine)
     if (url.searchParams.get("register_mine") === "true") {
       if (request.method !== "POST") {
@@ -624,7 +673,7 @@ if (url.searchParams.get("copy_mine") === "true") {
 
   const source = JSON.parse(sourceRaw);
   const newId = await generateId(env, "mine");
-  const newName = await generateCopyName(env, source.name);
+  const newName = await generateCopyName(env, source.name, "mine");
   const newKey = "deck:mine:" + newId;
 
   const newDeck = {
