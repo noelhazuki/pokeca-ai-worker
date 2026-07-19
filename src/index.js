@@ -676,11 +676,15 @@ if (url.searchParams.get("copy_mine") === "true") {
   const newName = await generateCopyName(env, source.name, "mine");
   const newKey = "deck:mine:" + newId;
 
+  const concern = sourceType === "meta"
+    ? (source.howToPlay ? `[元メタの回し方] ${source.howToPlay}` : "")
+    : (source.concern || "");
+
   const newDeck = {
     id: newId,
     name: newName,
     cardList: source.cardList,
-    concern: source.concern || "",
+    concern: concern,
     deckCode: "",
     locked: false
   };
