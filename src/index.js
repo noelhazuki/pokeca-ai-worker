@@ -179,6 +179,20 @@ const POKEKA2_CATEGORY_MAP = {
 // カード名の完全一致でTCGdexのセット内カードリストから照合する。
 // setCodeが無い、または"ENE"（公式サイト内部の管理用フォルダ名でTCGdexには存在せんコード）の
 // 場合は最初から照合を諦めてnullを返す。
+//
+// 2026-07-21追記：同一setCode内に同名カードの型番違いが複数存在するケースが実在すると判明
+// （例：ボスの指令 724/742・760/742、ポケパッド 070/080・103/080）。この場合は従来
+// 「複数ヒット＝諦めてnull」としていたが、それだとMC/M3のように常にprovisionalへ落ちて
+// 確定させる手段がなかった。決定事項として「型番(localId)が最小のものを機械的に採用」する
+// ルールを追加した。型番最小＝必ず「正しいカード」という保証ではない（割り切りルール）。
+function pickSmallestLocalIdCard(matches) {
+  return matches.reduce((smallest, current) => {
+    const smallestNum = parseInt(smallest.localId, 10);
+    const currentNum = parseInt(current.localId, 10);
+    return currentNum < smallestNum ? current : smallest;
+  });
+}
+
 async function matchTrainerOrEnergyCard(item, env) {
   if (!item.setCode || item.setCode === "ENE") return null;
 
@@ -186,9 +200,11 @@ async function matchTrainerOrEnergyCard(item, env) {
   if (!set || !Array.isArray(set.cards)) return null;
 
   const matches = set.cards.filter((c) => c.name === item.name);
-  if (matches.length !== 1) return null;
+  if (matches.length === 0) return null;
+  if (matches.length === 1) return matches[0].id;
 
-  return matches[0].id;
+  // 複数ヒット時：型番(localId)最小のものを採用
+  return pickSmallestLocalIdCard(matches).id;
 }
 // ▲ トレーナーズ・エネ名前照合
 
