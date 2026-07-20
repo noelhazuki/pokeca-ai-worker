@@ -1047,7 +1047,7 @@ if (url.searchParams.get("resolve_cardlist") === "true") {
 }
 // ▲ deckCode→cardList変換 (resolve_cardlist)
 
-// ▼ 既知手動判定setCodeの登録・一覧 (register_known_manual_setcode / list_known_manual_setcodes)
+// ▼ 既知手動判定setCodeの登録・一覧・削除 (register_known_manual_setcode / list_known_manual_setcodes / delete_known_manual_setcode)
 // 2026-07-20設計確定分。プロモ等、TCGdexに恒久的に載らへんと一度人間が判断したsetCodeを
 // KVへ覚えさせておくエンドポイント。登録後はresolve_cardlist・recheck_mineの両方で自動反映される。
 if (url.searchParams.get("register_known_manual_setcode") === "true") {
@@ -1082,6 +1082,34 @@ if (url.searchParams.get("list_known_manual_setcodes") === "true") {
   const known = await getKnownManualSetCodes(env);
   return new Response(
     JSON.stringify({ ok: true, known }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+
+if (url.searchParams.get("delete_known_manual_setcode") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { setCode } = body;
+
+  if (!setCode || typeof setCode !== "string") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "setCode（文字列）は必須やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const known = await getKnownManualSetCodes(env);
+  delete known[setCode];
+  await env.KV.put(KNOWN_MANUAL_SETCODES_KEY, JSON.stringify(known));
+
+  return new Response(
+    JSON.stringify({ ok: true, deleted: setCode, known }),
     { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
   );
 }
