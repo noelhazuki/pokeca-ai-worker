@@ -87,6 +87,28 @@ function applyProvisionalAwaitDefaults(cardList) {
 }
 // ▲ provisional awaitStatus初期値付与
 
+// ▼ 既知手動判定setCode (register_known_manual_setcode / resolve_cardlist / recheck_mine 共通)
+// プロモ等、TCGdexに恒久的に載らへんと人間が一度判断したsetCode（ポケモンはsetInfoの
+// 前半部分＝スペースより前、トレーナーズ・エネはsetCodeそのもの）を覚えておくためのKV。
+// 一度登録しておけば、次回以降のresolve_cardlist・recheck_mineで自動的にawaitStatus:'manual'扱いになる。
+// 値は { [setCode]: "覚えとく理由メモ" } の形。
+const KNOWN_MANUAL_SETCODES_KEY = "provisional:knownManualSetCodes";
+
+async function getKnownManualSetCodes(env) {
+  const raw = await env.KV.get(KNOWN_MANUAL_SETCODES_KEY);
+  return raw ? JSON.parse(raw) : {};
+}
+
+// item（pokeka2生データの1件）から判定用のsetCodeを取り出す。
+// ポケモンはsetInfo「SV11W 043/086」の前半（スペースより前）、トレーナーズ・エネはsetCodeそのもの。
+function extractSetCodeForKnownList(category, item) {
+  if (category === "pokemon") {
+    return typeof item.setInfo === "string" ? item.setInfo.split(" ")[0] : null;
+  }
+  return item.setCode || null;
+}
+// ▲ 既知手動判定setCode
+
 // ▼ setInfo→TCGdex id変換 (resolve_card_id専用)
 // 例：「SV11W 043/086」→スペースをハイフンに置換→「/」より前だけ取る→「SV11W-043」
 function convertSetInfoToCardId(setInfo) {
@@ -176,6 +198,7 @@ async function matchTrainerOrEnergyCard(item, env) {
 async function resolveCardList(pokeka2Data, env) {
   const cardList = {};
   const unmappedCategories = [];
+  const knownManualSetCodes = await getKnownManualSetCodes(env);
 
   for (const item of pokeka2Data.cards) {
     const internalCategory = POKEKA2_CATEGORY_MAP[item.category];
@@ -194,7 +217,11 @@ async function resolveCardList(pokeka2Data, env) {
         cardList[internalCategory].push({ cardId: candidateId, count: item.count });
       } else {
         // 再照合用にsetInfo（元の公式カード番号表記）も保持しておく（recheck_provisionalで使用）
-        cardList[internalCategory].push({ provisional: true, tempName: item.name, count: item.count, setInfo: item.setInfo || null });
+        const entry = { provisional: true, tempName: item.name, count: item.count, setInfo: item.setInfo || null };
+        // 既知の「恒久的にTCGdex未収録」setCode（プロモ等）なら、最初からmanual扱いにする
+        const knownCode = extractSetCodeForKnownList("pokemon", item);
+        if (knownCode && knownManualSetCodes[knownCode]) entry.awaitStatus = "manual";
+        cardList[internalCategory].push(entry);
       }
     } else {
       const cardId = await matchTrainerOrEnergyCard(item, env);
@@ -203,7 +230,10 @@ async function resolveCardList(pokeka2Data, env) {
         cardList[internalCategory].push({ cardId, count: item.count });
       } else {
         // 再照合用にsetCode（元の画像パス由来コード）も保持しておく（recheck_provisionalで使用）
-        cardList[internalCategory].push({ provisional: true, tempName: item.name, count: item.count, setCode: item.setCode || null });
+        const entry = { provisional: true, tempName: item.name, count: item.count, setCode: item.setCode || null };
+        const knownCode = extractSetCodeForKnownList(internalCategory, item);
+        if (knownCode && knownManualSetCodes[knownCode]) entry.awaitStatus = "manual";
+        cardList[internalCategory].push(entry);
       }
     }
   }
@@ -734,10 +764,12 @@ if (url.searchParams.get("recheck_mine") === "true") {
   }
 
   const existing = JSON.parse(raw);
+  const knownManualSetCodes = await getKnownManualSetCodes(env);
   let upgraded = 0;
   let stillProvisional = 0;
   let skipped = 0; // setInfo/setCode無しで再照合しようがない古いprovisional
   let manualSkipped = 0; // awaitStatus:'manual'のため対象外にしたもの
+  let autoManual = 0; // 既知manual setCodeに該当したため、TCGdexに問い合わせずmanualへ切替したもの
 
   for (const category of CARD_LIST_CATEGORIES) {
     if (!Array.isArray(existing.cardList?.[category])) continue;
@@ -746,6 +778,16 @@ if (url.searchParams.get("recheck_mine") === "true") {
       const entry = existing.cardList[category][i];
       if (entry.provisional !== true) continue;
       if (entry.awaitStatus === "manual") { manualSkipped++; continue; }
+
+      // 既知の「恒久的にTCGdex未収録」setCodeに該当するなら、TCGdexへ問い合わせるまでもなくmanualへ切替
+      const knownCode = category === "pokemon"
+        ? (typeof entry.setInfo === "string" ? entry.setInfo.split(" ")[0] : null)
+        : entry.setCode;
+      if (knownCode && knownManualSetCodes[knownCode]) {
+        entry.awaitStatus = "manual";
+        autoManual++;
+        continue;
+      }
 
       let matchedCardId = null;
 
@@ -768,14 +810,14 @@ if (url.searchParams.get("recheck_mine") === "true") {
     }
   }
 
-  if (upgraded > 0) {
+  if (upgraded > 0 || autoManual > 0) {
     // 更新直前に1世代だけバックアップ退避（update_mineと同じ方式）
     await env.KV.put("deck:mine:backup:" + id, raw);
     await env.KV.put(key, JSON.stringify(existing));
   }
 
   return new Response(
-    JSON.stringify({ ok: true, id, upgraded, stillProvisional, skipped, manualSkipped }),
+    JSON.stringify({ ok: true, id, upgraded, stillProvisional, skipped, manualSkipped, autoManual }),
     { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
   );
 }
@@ -1004,6 +1046,46 @@ if (url.searchParams.get("resolve_cardlist") === "true") {
   );
 }
 // ▲ deckCode→cardList変換 (resolve_cardlist)
+
+// ▼ 既知手動判定setCodeの登録・一覧 (register_known_manual_setcode / list_known_manual_setcodes)
+// 2026-07-20設計確定分。プロモ等、TCGdexに恒久的に載らへんと一度人間が判断したsetCodeを
+// KVへ覚えさせておくエンドポイント。登録後はresolve_cardlist・recheck_mineの両方で自動反映される。
+if (url.searchParams.get("register_known_manual_setcode") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { setCode, reason } = body;
+
+  if (!setCode || typeof setCode !== "string") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "setCode（文字列）は必須やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const known = await getKnownManualSetCodes(env);
+  known[setCode] = typeof reason === "string" ? reason : "";
+  await env.KV.put(KNOWN_MANUAL_SETCODES_KEY, JSON.stringify(known));
+
+  return new Response(
+    JSON.stringify({ ok: true, setCode, known }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+
+if (url.searchParams.get("list_known_manual_setcodes") === "true") {
+  const known = await getKnownManualSetCodes(env);
+  return new Response(
+    JSON.stringify({ ok: true, known }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ 既知手動判定setCodeの登録・一覧
 
     // ▼ 新弾差分確認 (check_set) ※新弾ロード運用フローのステップ2、都度TCGdexへ直接照会（キャッシュ無し）
     if (url.searchParams.get("check_set") === "true") {
