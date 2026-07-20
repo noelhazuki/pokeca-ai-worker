@@ -42,6 +42,14 @@ function validateCardList(cardList) {
         if (typeof entry.tempName !== "string" || entry.tempName.trim() === "") {
           return `cardList.${category}の仮登録要素にtempName（文字列）が無いで`;
         }
+        // awaitStatus/waitDaysは任意項目（無ければapplyProvisionalAwaitDefaultsで初期値が入る）。
+        // 送られてきた場合のみ型チェックする。
+        if ("awaitStatus" in entry && entry.awaitStatus !== "waiting" && entry.awaitStatus !== "manual") {
+          return `cardList.${category}の仮登録要素のawaitStatusは'waiting'か'manual'にしてな`;
+        }
+        if ("waitDays" in entry && (typeof entry.waitDays !== "number" || !Number.isInteger(entry.waitDays) || entry.waitDays < 1)) {
+          return `cardList.${category}の仮登録要素のwaitDaysは1以上の整数にしてな`;
+        }
         continue;
       }
       if (typeof entry.cardId !== "string" || entry.cardId.trim() === "") {
@@ -53,6 +61,31 @@ function validateCardList(cardList) {
   return null; // 問題なし
 }
 // ▲ cardList検証 (register_meta / register_mine 共通)
+
+// ▼ provisional awaitStatus初期値付与 (register_meta / register_mine / update_mine 共通)
+// 2026-07-20設計確定分の実装。provisionalエントリーにregisteredAt/awaitStatus/waitDaysが
+// 無ければ、登録・更新のこの時点で初期値を埋める。既に値が入っている場合（recheck_mine後の
+// 再保存や、manual切替ボタンからの部分更新等）は上書きしない＝呼んでも安全な「不足分だけ埋める」関数。
+// - registeredAt: 未指定ならこの関数を呼んだ時刻をISO文字列で記録（サーバー側の時刻を正とする）
+// - awaitStatus: 明示的に'manual'が送られてきた場合のみそちらを採用。それ以外（未指定 or 不正値）は'waiting'
+// - waitDays: 未指定 or 不正値なら30日固定（デフォルト）
+function applyProvisionalAwaitDefaults(cardList) {
+  const now = new Date().toISOString();
+  for (const category of CARD_LIST_CATEGORIES) {
+    const entries = cardList[category];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (entry.provisional !== true) continue;
+      if (!entry.registeredAt) entry.registeredAt = now;
+      if (entry.awaitStatus !== "manual") entry.awaitStatus = "waiting";
+      if (typeof entry.waitDays !== "number" || !Number.isInteger(entry.waitDays) || entry.waitDays < 1) {
+        entry.waitDays = 30;
+      }
+    }
+  }
+  return cardList;
+}
+// ▲ provisional awaitStatus初期値付与
 
 // ▼ setInfo→TCGdex id変換 (resolve_card_id専用)
 // 例：「SV11W 043/086」→スペースをハイフンに置換→「/」より前だけ取る→「SV11W-043」
@@ -344,6 +377,8 @@ export default {
         );
       }
 
+      applyProvisionalAwaitDefaults(cardList);
+
       const regulationResult = await validateRegulationLegality(cardList, env);
       if (!regulationResult.valid) {
         return new Response(
@@ -528,6 +563,8 @@ if (getMetaHowToPlayId) {
         );
       }
 
+      applyProvisionalAwaitDefaults(cardList);
+
       const regulationResult = await validateRegulationLegality(cardList, env);
       if (!regulationResult.valid) {
         return new Response(
@@ -600,6 +637,10 @@ if (url.searchParams.get("update_mine") === "true") {
       );
     }
 
+    // register_meta/register_mineと同じく、update_mine経由で新しく増えたprovisionalにも
+    // 初期値を埋める（既存のregisteredAtがあるものは上書きしない）。
+    applyProvisionalAwaitDefaults(merged.cardList);
+
     const regulationResult = await validateRegulationLegality(merged.cardList, env);
     if (!regulationResult.valid) {
       return new Response(
@@ -664,6 +705,7 @@ if (url.searchParams.get("unlock_mine") === "true") {
 // resolveCardListと同じ照合ロジックでTCGdexへ再照合。ヒットすればconfirmed（{cardId,count}）へ昇格。
 // ロック中のデッキでも実行可（中身の構成・枚数は変えず、既存カードの正体確定のみのため）。
 // setInfo/setCoreを持たない古いprovisional（この機能実装前に登録されたもの）は再照合できずスキップされる。
+// awaitStatus:'manual'のエントリーは「待っても永久に載らない見込み」として再照合の対象外（2026-07-20設計確定分）。
 if (url.searchParams.get("recheck_mine") === "true") {
   if (request.method !== "POST") {
     return new Response(
@@ -695,6 +737,7 @@ if (url.searchParams.get("recheck_mine") === "true") {
   let upgraded = 0;
   let stillProvisional = 0;
   let skipped = 0; // setInfo/setCode無しで再照合しようがない古いprovisional
+  let manualSkipped = 0; // awaitStatus:'manual'のため対象外にしたもの
 
   for (const category of CARD_LIST_CATEGORIES) {
     if (!Array.isArray(existing.cardList?.[category])) continue;
@@ -702,6 +745,7 @@ if (url.searchParams.get("recheck_mine") === "true") {
     for (let i = 0; i < existing.cardList[category].length; i++) {
       const entry = existing.cardList[category][i];
       if (entry.provisional !== true) continue;
+      if (entry.awaitStatus === "manual") { manualSkipped++; continue; }
 
       let matchedCardId = null;
 
@@ -731,7 +775,7 @@ if (url.searchParams.get("recheck_mine") === "true") {
   }
 
   return new Response(
-    JSON.stringify({ ok: true, id, upgraded, stillProvisional, skipped }),
+    JSON.stringify({ ok: true, id, upgraded, stillProvisional, skipped, manualSkipped }),
     { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
   );
 }
