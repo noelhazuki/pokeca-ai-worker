@@ -202,6 +202,8 @@ async function validateRegulationLegality(cardList, env) {
     if (!entries) continue;
 
     for (const entry of entries) {
+      if (entry.provisional) continue; // provisionalはcardId未確定のためレギュ判定対象外（confirmedになった時のみ判定する）
+
       const { card } = await getCardData(env, entry.cardId);
 
       if (!card) {
