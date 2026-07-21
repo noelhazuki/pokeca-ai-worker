@@ -221,7 +221,10 @@ const POKEKA2_CATEGORY_MAP = {
   "ポケモンのどうぐ": "tools",
   "サポート": "supporters",
   "スタジアム": "stadiums",
-  "エネルギー": "energy"
+  "エネルギー": "energy", // 旧カテゴリ値。pokeka2側の分割後は基本的に来ないはずだが後方互換のため残す
+  "基本エネルギー": "energy", // 2026-07-21〜：pokeka2側でエネルギーが基本/特殊に分割されたことに対応
+  "特殊エネルギー": "energy", // 現状cardList側に基本/特殊を区別するフィールドが無いため一旦energyへ統合。区別は将来のOCR共通スキーマ（isBasicEnergy）で行う想定
+  "ACE SPEC": "aceSpec" // 2026-07-21〜：pokeka2側で名前の"(ACE SPEC)"注記から検出しcategoryを上書きする方式に対応
 };
 // ▲ pokeka2カテゴリ→内部カテゴリ変換
 
