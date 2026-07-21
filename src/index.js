@@ -69,8 +69,27 @@ function validateCardList(cardList) {
 // - registeredAt: 未指定ならこの関数を呼んだ時刻をISO文字列で記録（サーバー側の時刻を正とする）
 // - awaitStatus: 明示的に'manual'が送られてきた場合のみそちらを採用。それ以外（未指定 or 不正値）は'waiting'
 // - waitDays: 未指定 or 不正値なら30日固定（デフォルト）
+// - pid: 2026-07-21追加。tempName＋setInfoの表記ゆれ対策で、provisionalエントリーごとに
+//   デッキ内で一意な背番号（p1, p2…）を振る。カテゴリを跨いで通し番号（ポケモンのp3の次は
+//   グッズでもp4、という具合）。既にpidを持つエントリー（recheck_mine後の再保存等）は
+//   上書きせず、無いものだけ採番する。採番前に既存の最大番号を一度スキャンしてから
+//   続き番号を割り当てるので、update_mineで後から増えたprovisionalにも重複なく振れる。
 function applyProvisionalAwaitDefaults(cardList) {
   const now = new Date().toISOString();
+
+  let maxPid = 0;
+  for (const category of CARD_LIST_CATEGORIES) {
+    const entries = cardList[category];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (entry.provisional !== true) continue;
+      if (typeof entry.pid === "string" && /^p\d+$/.test(entry.pid)) {
+        const n = parseInt(entry.pid.slice(1), 10);
+        if (n > maxPid) maxPid = n;
+      }
+    }
+  }
+
   for (const category of CARD_LIST_CATEGORIES) {
     const entries = cardList[category];
     if (!Array.isArray(entries)) continue;
@@ -80,6 +99,10 @@ function applyProvisionalAwaitDefaults(cardList) {
       if (entry.awaitStatus !== "manual") entry.awaitStatus = "waiting";
       if (typeof entry.waitDays !== "number" || !Number.isInteger(entry.waitDays) || entry.waitDays < 1) {
         entry.waitDays = 30;
+      }
+      if (typeof entry.pid !== "string" || entry.pid.trim() === "") {
+        maxPid += 1;
+        entry.pid = `p${maxPid}`;
       }
     }
   }
@@ -92,9 +115,21 @@ function applyProvisionalAwaitDefaults(cardList) {
 // setInfoの比較先はカテゴリによって違う点に注意：ポケモンはentry.setInfo、トレーナーズ／エネはentry.setCode。
 // （呼び出し側は両方とも同じ"setInfo"という名前でリクエストを送ってくる想定。データ構造上の名前の違いはこの関数が吸収する）
 // 見つからなければnullを返す。
-function findProvisionalEntry(cardList, category, tempName, setInfo) {
+//
+// 2026-07-21追記：pid（p1,p2…の背番号）による特定ルートを追加。tempNameは人間が入力した
+// テキストなので表記ゆれ（末尾スペース等）で完全一致に失敗するケースがあり、pidならその
+// 心配がない。pidが渡されてきた場合はpid一致のみで特定し、tempName/setInfoは見ない
+// （categoryも実質不要だが、呼び出し側の互換のため引数自体は残す）。
+// pidが渡されなかった場合は、pid実装前に登録された古いprovisionalとの互換のため、
+// 従来通りcategory＋tempName＋setInfoの完全一致にフォールバックする。
+function findProvisionalEntry(cardList, category, tempName, setInfo, pid) {
   const entries = cardList?.[category];
   if (!Array.isArray(entries)) return null;
+
+  if (pid) {
+    return entries.find((entry) => entry.provisional === true && entry.pid === pid) || null;
+  }
+
   return entries.find((entry) => {
     if (entry.provisional !== true) return false;
     if (entry.tempName !== tempName) return false;
@@ -860,8 +895,12 @@ if (url.searchParams.get("recheck_mine") === "true") {
 // 1件のprovisionalエントリーを、人間が個別に見て「これは実質TCGdexに載らんやつやな」と
 // 判断した時に、awaitStatusを手動で'manual'へ切り替えるための専用エンドポイント（2026-07-21新設）。
 // recheck_mineと同じ理屈で、ロック中のデッキでも実行可（枚数・構成は変えず状態フラグのみの更新のため）。
-// 対象特定はcategory＋tempName＋setInfoの完全一致（findProvisionalEntry参照）。
+// 対象特定はpid（背番号）優先、無ければcategory＋tempName＋setInfoの完全一致（findProvisionalEntry参照）。
 // waitDays自体はここでは変更しない（延長したい場合は update_wait_days を別途呼ぶ）。
+//
+// 2026-07-21追記：pidを任意項目として追加。pidを渡す場合はtempName/setInfoは省略可（categoryは
+// deck:mine内のカテゴリ配列を特定するため引き続き必須）。pidを渡さない場合は従来通り
+// tempName/setInfo必須（pid実装前の古いprovisional向けの経路として残す）。
 if (url.searchParams.get("set_manual") === "true") {
   if (request.method !== "POST") {
     return new Response(
@@ -871,11 +910,17 @@ if (url.searchParams.get("set_manual") === "true") {
   }
 
   const body = await request.json();
-  const { deckId, category, tempName, setInfo } = body;
+  const { deckId, category, tempName, setInfo, pid } = body;
 
-  if (!deckId || !category || !tempName || !setInfo) {
+  if (!deckId || !category) {
     return new Response(
-      JSON.stringify({ ok: false, error: "deckId/category/tempName/setInfoは必須やで" }),
+      JSON.stringify({ ok: false, error: "deckId/categoryは必須やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+  if (!pid && (!tempName || !setInfo)) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "pidを渡さない場合はtempName/setInfoも必須やで" }),
       { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   }
@@ -896,10 +941,10 @@ if (url.searchParams.get("set_manual") === "true") {
   }
 
   const existing = JSON.parse(raw);
-  const target = findProvisionalEntry(existing.cardList, category, tempName, setInfo);
+  const target = findProvisionalEntry(existing.cardList, category, tempName, setInfo, pid);
   if (!target) {
     return new Response(
-      JSON.stringify({ ok: false, error: "該当するprovisionalエントリーが見つからんかったで（category/tempName/setInfoを確認してな）" }),
+      JSON.stringify({ ok: false, error: "該当するprovisionalエントリーが見つからんかったで（pid、またはcategory/tempName/setInfoを確認してな）" }),
       { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   }
@@ -908,7 +953,7 @@ if (url.searchParams.get("set_manual") === "true") {
   await env.KV.put(key, JSON.stringify(existing));
 
   return new Response(
-    JSON.stringify({ ok: true, deckId, category, tempName, awaitStatus: "manual" }),
+    JSON.stringify({ ok: true, deckId, category, pid: target.pid, tempName: target.tempName, awaitStatus: "manual" }),
     { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
   );
 }
@@ -918,7 +963,8 @@ if (url.searchParams.get("set_manual") === "true") {
 // 1件のprovisionalエントリーのwaitDaysを上書きする専用エンドポイント（2026-07-21新設）。
 // 絶対値方式：UI側の見た目が「+7」ボタンでも、内部へ送信する時点で計算済みの絶対値にしてから渡す想定
 // （このエンドポイント自体は足し算をせず、送られてきた値でそのまま上書きするだけ）。
-// recheck_mineと同じ理屈で、ロック中のデッキでも実行可。対象特定はset_manualと同じくfindProvisionalEntry。
+// recheck_mineと同じ理屈で、ロック中のデッキでも実行可。対象特定はset_manualと同じくfindProvisionalEntry
+// （pid優先、無ければcategory＋tempName＋setInfo。2026-07-21追記：pid経路を追加）。
 if (url.searchParams.get("update_wait_days") === "true") {
   if (request.method !== "POST") {
     return new Response(
@@ -928,11 +974,17 @@ if (url.searchParams.get("update_wait_days") === "true") {
   }
 
   const body = await request.json();
-  const { deckId, category, tempName, setInfo, waitDays } = body;
+  const { deckId, category, tempName, setInfo, waitDays, pid } = body;
 
-  if (!deckId || !category || !tempName || !setInfo) {
+  if (!deckId || !category) {
     return new Response(
-      JSON.stringify({ ok: false, error: "deckId/category/tempName/setInfoは必須やで" }),
+      JSON.stringify({ ok: false, error: "deckId/categoryは必須やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+  if (!pid && (!tempName || !setInfo)) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "pidを渡さない場合はtempName/setInfoも必須やで" }),
       { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   }
@@ -959,10 +1011,10 @@ if (url.searchParams.get("update_wait_days") === "true") {
   }
 
   const existing = JSON.parse(raw);
-  const target = findProvisionalEntry(existing.cardList, category, tempName, setInfo);
+  const target = findProvisionalEntry(existing.cardList, category, tempName, setInfo, pid);
   if (!target) {
     return new Response(
-      JSON.stringify({ ok: false, error: "該当するprovisionalエントリーが見つからんかったで（category/tempName/setInfoを確認してな）" }),
+      JSON.stringify({ ok: false, error: "該当するprovisionalエントリーが見つからんかったで（pid、またはcategory/tempName/setInfoを確認してな）" }),
       { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   }
@@ -971,7 +1023,7 @@ if (url.searchParams.get("update_wait_days") === "true") {
   await env.KV.put(key, JSON.stringify(existing));
 
   return new Response(
-    JSON.stringify({ ok: true, deckId, category, tempName, waitDays }),
+    JSON.stringify({ ok: true, deckId, category, pid: target.pid, tempName: target.tempName, waitDays }),
     { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
   );
 }
