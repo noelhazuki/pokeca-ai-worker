@@ -87,6 +87,23 @@ function applyProvisionalAwaitDefaults(cardList) {
 }
 // ▲ provisional awaitStatus初期値付与
 
+// ▼ provisional対象特定ヘルパー (set_manual / update_wait_days 共通)
+// category＋tempName＋setInfoの完全一致で、cardList内から該当する1件のprovisionalエントリーを探す。
+// setInfoの比較先はカテゴリによって違う点に注意：ポケモンはentry.setInfo、トレーナーズ／エネはentry.setCode。
+// （呼び出し側は両方とも同じ"setInfo"という名前でリクエストを送ってくる想定。データ構造上の名前の違いはこの関数が吸収する）
+// 見つからなければnullを返す。
+function findProvisionalEntry(cardList, category, tempName, setInfo) {
+  const entries = cardList?.[category];
+  if (!Array.isArray(entries)) return null;
+  return entries.find((entry) => {
+    if (entry.provisional !== true) return false;
+    if (entry.tempName !== tempName) return false;
+    const compareField = category === "pokemon" ? entry.setInfo : entry.setCode;
+    return compareField === setInfo;
+  }) || null;
+}
+// ▲ provisional対象特定ヘルパー
+
 // ▼ 既知手動判定setCode (register_known_manual_setcode / resolve_cardlist / recheck_mine 共通)
 // プロモ等、TCGdexに恒久的に載らへんと人間が一度判断したsetCode（ポケモンはsetInfoの
 // 前半部分＝スペースより前、トレーナーズ・エネはsetCodeそのもの）を覚えておくためのKV。
@@ -838,6 +855,127 @@ if (url.searchParams.get("recheck_mine") === "true") {
   );
 }
 // ▲ 自分のデッキ provisional一括再チェック (recheck_mine)
+
+// ▼ 自分のデッキ provisional manual切替 (set_manual)
+// 1件のprovisionalエントリーを、人間が個別に見て「これは実質TCGdexに載らんやつやな」と
+// 判断した時に、awaitStatusを手動で'manual'へ切り替えるための専用エンドポイント（2026-07-21新設）。
+// recheck_mineと同じ理屈で、ロック中のデッキでも実行可（枚数・構成は変えず状態フラグのみの更新のため）。
+// 対象特定はcategory＋tempName＋setInfoの完全一致（findProvisionalEntry参照）。
+// waitDays自体はここでは変更しない（延長したい場合は update_wait_days を別途呼ぶ）。
+if (url.searchParams.get("set_manual") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { deckId, category, tempName, setInfo } = body;
+
+  if (!deckId || !category || !tempName || !setInfo) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "deckId/category/tempName/setInfoは必須やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+  if (!CARD_LIST_CATEGORIES.includes(category)) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `categoryが不正やで（許可カテゴリ: ${CARD_LIST_CATEGORIES.join(", ")}）` }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const key = "deck:mine:" + deckId;
+  const raw = await env.KV.get(key);
+  if (!raw) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `deckId "${deckId}" は見つからんかったで` }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const existing = JSON.parse(raw);
+  const target = findProvisionalEntry(existing.cardList, category, tempName, setInfo);
+  if (!target) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "該当するprovisionalエントリーが見つからんかったで（category/tempName/setInfoを確認してな）" }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  target.awaitStatus = "manual";
+  await env.KV.put(key, JSON.stringify(existing));
+
+  return new Response(
+    JSON.stringify({ ok: true, deckId, category, tempName, awaitStatus: "manual" }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ 自分のデッキ provisional manual切替 (set_manual)
+
+// ▼ 自分のデッキ provisional waitDays延長 (update_wait_days)
+// 1件のprovisionalエントリーのwaitDaysを上書きする専用エンドポイント（2026-07-21新設）。
+// 絶対値方式：UI側の見た目が「+7」ボタンでも、内部へ送信する時点で計算済みの絶対値にしてから渡す想定
+// （このエンドポイント自体は足し算をせず、送られてきた値でそのまま上書きするだけ）。
+// recheck_mineと同じ理屈で、ロック中のデッキでも実行可。対象特定はset_manualと同じくfindProvisionalEntry。
+if (url.searchParams.get("update_wait_days") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { deckId, category, tempName, setInfo, waitDays } = body;
+
+  if (!deckId || !category || !tempName || !setInfo) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "deckId/category/tempName/setInfoは必須やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+  if (!CARD_LIST_CATEGORIES.includes(category)) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `categoryが不正やで（許可カテゴリ: ${CARD_LIST_CATEGORIES.join(", ")}）` }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+  if (typeof waitDays !== "number" || !Number.isInteger(waitDays) || waitDays < 1) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "waitDaysは1以上の整数（絶対値）で送ってな" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const key = "deck:mine:" + deckId;
+  const raw = await env.KV.get(key);
+  if (!raw) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `deckId "${deckId}" は見つからんかったで` }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const existing = JSON.parse(raw);
+  const target = findProvisionalEntry(existing.cardList, category, tempName, setInfo);
+  if (!target) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "該当するprovisionalエントリーが見つからんかったで（category/tempName/setInfoを確認してな）" }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  target.waitDays = waitDays;
+  await env.KV.put(key, JSON.stringify(existing));
+
+  return new Response(
+    JSON.stringify({ ok: true, deckId, category, tempName, waitDays }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ 自分のデッキ provisional waitDays延長 (update_wait_days)
 
 // ▼ 自分のデッキ削除 (delete_mine)
 if (url.searchParams.get("delete_mine") === "true") {
