@@ -223,7 +223,7 @@ const POKEKA2_CATEGORY_MAP = {
   "スタジアム": "stadiums",
   "エネルギー": "energy", // 旧カテゴリ値。pokeka2側の分割後は基本的に来ないはずだが後方互換のため残す
   "基本エネルギー": "energy", // 2026-07-21〜：pokeka2側でエネルギーが基本/特殊に分割されたことに対応
-  "特殊エネルギー": "energy", // 現状cardList側に基本/特殊を区別するフィールドが無いため一旦energyへ統合。区別は将来のOCR共通スキーマ（isBasicEnergy）で行う想定
+  "特殊エネルギー": "energy", // cardList側では基本/特殊とも同じenergyカテゴリに統合したまま。区別はvalidateDeckRules内でTCGdexのenergyTypeを都度参照する方式で2026-07-22実装済み
   "ACE SPEC": "aceSpec" // 2026-07-21〜：pokeka2側で名前の"(ACE SPEC)"注記から検出しcategoryを上書きする方式に対応
 };
 // ▲ pokeka2カテゴリ→内部カテゴリ変換
@@ -363,15 +363,23 @@ async function validateRegulationLegality(cardList, env) {
 // これに合わせて、上のvalidateRegulationLegalityの呼び出し側（register_meta/register_mine/update_mine）も
 // 同日、400ブロック方式からMTGA方式（登録は通し、violationsは警告として返すだけ）に変更した。
 //
-// 実装範囲（2026-07-21時点）：同名カード基本4枚まで／デッキ合計60枚ちょうど の2つのみ。
-// 残り3つ（たね最低1体・ACE SPEC合計1枚・基本エネルギー無制限）はcross_category_fields
-// （isAceSpec/isBasicEnergy、OCR共通スキーマ側で未実装）が揃ってから追加する。
-// 暫定措置：energyカテゴリは「基本エネルギー無制限」との切り分けが今はできないため、
-// 同名4枚チェックの対象から一旦除外している（cross_category_fields実装後に見直し予定）。
+// 実装範囲（2026-07-22時点）：5ルール全て実装済み（同名4枚まで／60枚ちょうど／ACE SPEC合計1枚まで／
+// 基本エネルギー無制限／たね最低1体）。isBasicEnergy・isAceSpecという専用の中間フィールドは
+// 結局OCR共通スキーマ側に新設せず、判定のたびにTCGdexカードデータ（energyType/stage/trainerType）を
+// getCardData()経由で直接参照する方式で決着した（cross_category_fields構想からの方針変更、下記参照）。
+//
+// ACE SPEC判定の設計メモ（2026-07-22決定）：
+// resolve_cardlist経由の登録は、pokeka2側で名前の"(ACE SPEC)"注記を検出した時点で
+// 既にcardList.aceSpecカテゴリへ振り分け済み（POKEKA2_CATEGORY_MAP参照）。そのため
+// 「goods/tools/supporters/stadiumsに紛れ込んだACE SPECカードもTCGdexのtrainerTypeで
+// 拾いにいく」という厳密案（B案）は採用せず、aceSpecカテゴリの合計countのみで判定するA案を採用した。
+// 手動でcardListを直接組み立てて登録する場合（resolve_cardlist経由でない場合）、ACE SPECカードを
+// 誤って別カテゴリに置くとこの判定は効かない点に注意（運用上ほぼresolve_cardlist経由のため許容）。
 //
 // 返り値の形（deckRuleViolations、既存のviolationsとは別物）：
-// ・デッキ全体用：{ reason: "total_count", count, expected }
+// ・デッキ全体用：{ reason: "total_count" | "no_basic_pokemon", count, expected }
 // ・カード単位用：{ reason: "same_name_over_limit", name, count, limit }
+// ・合計超過用：{ reason: "ace_spec_over_limit", total, limit, cards }
 async function validateDeckRules(cardList, env) {
   const deckRuleViolations = [];
 
@@ -388,15 +396,33 @@ async function validateDeckRules(cardList, env) {
     deckRuleViolations.push({ reason: "total_count", count: totalCount, expected: 60 });
   }
 
-  // ② 同名カード基本4枚まで（名前基準で合算。energyカテゴリは暫定除外・上記コメント参照）
+  // energyカテゴリの各エントリーについて、先に基本エネルギーかどうか（isBasicEnergy相当）を判定しておく。
+  // TCGdexのenergyType:"Normal"が基本エネルギー、それ以外（"Special"等）が特殊エネルギー。
+  // provisional（cardId未確定）は正体不明なので基本エネルギー扱いにはしない＝安全側（4枚チェック対象に残す）。
+  const energyEntries = cardList.energy || [];
+  const energyIsBasicFlags = [];
+  for (const entry of energyEntries) {
+    if (entry.provisional) {
+      energyIsBasicFlags.push(false);
+      continue;
+    }
+    const { card } = await getCardData(env, entry.cardId);
+    energyIsBasicFlags.push(!!(card && card.energyType === "Normal"));
+  }
+
+  // ② 同名カード基本4枚まで（名前基準で合算）
+  // 2026-07-22〜：energyカテゴリも対象に含める。ただし基本エネルギー（上で判定済み）は
+  // 「基本エネルギー無制限」ルール対象のため、名前集計そのものから除外する。
   const nameCountMap = new Map(); // name -> 合計count
 
   for (const category of CARD_LIST_CATEGORIES) {
-    if (category === "energy") continue;
     const entries = cardList[category];
     if (!entries) continue;
 
-    for (const entry of entries) {
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (category === "energy" && energyIsBasicFlags[i]) continue; // 基本エネルギーは無制限、ここでは数えない
+
       let name;
       if (entry.provisional) {
         name = entry.tempName;
@@ -412,6 +438,39 @@ async function validateDeckRules(cardList, env) {
     if (count > 4) {
       deckRuleViolations.push({ reason: "same_name_over_limit", name, count, limit: 4 });
     }
+  }
+
+  // ③ ACE SPEC合計1枚まで（A案：cardList.aceSpecカテゴリの合計countのみで判定。設計メモは関数冒頭コメント参照）
+  const aceSpecEntries = cardList.aceSpec || [];
+  let aceSpecTotal = 0;
+  const aceSpecNames = [];
+  for (const entry of aceSpecEntries) {
+    aceSpecTotal += entry.count;
+    if (entry.provisional) {
+      aceSpecNames.push(entry.tempName);
+    } else {
+      const { card } = await getCardData(env, entry.cardId);
+      aceSpecNames.push(card ? card.name : entry.cardId);
+    }
+  }
+  if (aceSpecTotal > 1) {
+    deckRuleViolations.push({ reason: "ace_spec_over_limit", total: aceSpecTotal, limit: 1, cards: aceSpecNames });
+  }
+
+  // ④ たね（Basic）ポケモン最低1体
+  // TCGdexのstage:"Basic"がたね相当。provisional（cardId未確定）はstage判定できひんため対象外
+  // （数えない＝厳しめに倒す。confirmed化してから正しく判定される）。
+  const pokemonEntries = cardList.pokemon || [];
+  let basicCount = 0;
+  for (const entry of pokemonEntries) {
+    if (entry.provisional) continue;
+    const { card } = await getCardData(env, entry.cardId);
+    if (card && card.stage === "Basic") {
+      basicCount += entry.count;
+    }
+  }
+  if (basicCount < 1) {
+    deckRuleViolations.push({ reason: "no_basic_pokemon", count: basicCount, expected: 1 });
   }
 
   return deckRuleViolations;
