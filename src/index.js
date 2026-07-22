@@ -522,6 +522,85 @@ async function generateCopyName(env, sourceName, type) {
 }
 // ▲ コピー時自動命名
 
+// ▼ ask用ヘルパー：cardList → カード名の一覧テキスト化
+// 既存get_cardにcardId全件をそのまま回す素直な方式（大半KVヒットのためコスト影響小）
+// provisionalカード（cardId未確定）はtempNameをそのまま使う
+async function buildCardListSummary(cardList, env) {
+  const lines = [];
+  for (const category of CARD_LIST_CATEGORIES) {
+    const items = cardList[category];
+    if (!Array.isArray(items)) continue;
+    for (const item of items) {
+      if (item.cardId) {
+        const { card } = await getCardData(env, item.cardId);
+        const name = card ? card.name : item.cardId;
+        lines.push(`${name} ×${item.count}`);
+      } else if (item.tempName) {
+        lines.push(`${item.tempName} ×${item.count}（未確定カード）`);
+      }
+    }
+  }
+  return lines;
+}
+// ▲ cardList → カード名の一覧テキスト化
+
+// ▼ ask用ヘルパー：Claude API呼び出し
+// レスポンスはJSON構造化{answer, newConcerns}で受け取る方式に確定（2026-07-22）。
+// newConcernsの抽出は別ロジックを作らず、AI自身に構造化出力させる。
+async function callAskClaude(env, { deckName, cardListSummary, openConcerns, question }) {
+  const systemPrompt = `あなたはポケモンカードゲームのデッキ構築アドバイザーです。
+以下のデッキ内容とこれまでの未解決の懸念点を踏まえて、ユーザーの質問に答えてください。
+
+# デッキ名
+${deckName}
+
+# デッキの中身
+${cardListSummary.join("\n")}
+
+# これまでの未解決の懸念点
+${openConcerns.length ? openConcerns.join("\n") : "（なし）"}
+
+# 出力形式
+必ず以下のJSON形式のみで出力すること。前置き・説明・Markdownのコードブロック記号は一切付けないでください。
+{"answer": "質問への回答文", "newConcerns": ["今回の回答の中で新たに気づいた未解決の懸念点。無ければ空配列"]}`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01"
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-5",
+      max_tokens: 1024,
+      system: systemPrompt,
+      messages: [{ role: "user", content: question }]
+    })
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Claude API呼び出し失敗（${res.status}）: ${errText}`);
+  }
+
+  const data = await res.json();
+  const textBlock = (data.content || []).find((b) => b.type === "text");
+  const rawText = textBlock ? textBlock.text : "";
+
+  // JSONパース失敗時のフォールバック：素の文章をそのままanswerとして返す（newConcernsは空扱い）
+  try {
+    const parsed = JSON.parse(rawText.trim());
+    return {
+      answer: parsed.answer || rawText,
+      newConcerns: Array.isArray(parsed.newConcerns) ? parsed.newConcerns : []
+    };
+  } catch (e) {
+    return { answer: rawText, newConcerns: [] };
+  }
+}
+// ▲ Claude API呼び出し
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -1498,6 +1577,63 @@ if (url.searchParams.get("recheck_all") === "true") {
   );
 }
 // ▲ レギュ再チェック一括 (recheck_all)
+
+// ▼ デッキ構築相談 (ask) - 2026-07-22実装
+if (url.searchParams.get("ask") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { deckId, question } = body;
+
+  if (!deckId || !question) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "deckId/questionは両方必須やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const key = "deck:mine:" + deckId;
+  const raw = await env.KV.get(key);
+  if (!raw) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `deckId "${deckId}" は見つからんかったで` }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const deck = JSON.parse(raw);
+  const openConcerns = deck.openConcerns || [];
+
+  try {
+    const cardListSummary = await buildCardListSummary(deck.cardList, env);
+    const claudeResult = await callAskClaude(env, {
+      deckName: deck.name,
+      cardListSummary,
+      openConcerns,
+      question
+    });
+
+    const updatedConcerns = [...openConcerns, ...claudeResult.newConcerns];
+    await env.KV.put(key, JSON.stringify({ ...deck, openConcerns: updatedConcerns }));
+
+    return new Response(
+      JSON.stringify({ ok: true, answer: claudeResult.answer, newConcerns: claudeResult.newConcerns }),
+      { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  } catch (e) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "Claude APIとのやりとりでエラーが出たで: " + e.message }),
+      { status: 500, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+}
+// ▲ デッキ構築相談 (ask)
+
     return new Response("ok", { headers: { "Content-Type": "text/plain", ...CORS_HEADERS } });
   }
 };
