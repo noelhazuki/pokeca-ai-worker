@@ -358,6 +358,66 @@ async function validateRegulationLegality(cardList, env) {
 }
 // ▲ レギュレーション適合チェック
 
+// ▼ deckRules判定 (register_meta / register_mine / update_mine 共通)
+// 2026-07-21設計確定：MTGA方式（違反があっても登録・保存はブロックしない。警告として返すのみ）。
+// これに合わせて、上のvalidateRegulationLegalityの呼び出し側（register_meta/register_mine/update_mine）も
+// 同日、400ブロック方式からMTGA方式（登録は通し、violationsは警告として返すだけ）に変更した。
+//
+// 実装範囲（2026-07-21時点）：同名カード基本4枚まで／デッキ合計60枚ちょうど の2つのみ。
+// 残り3つ（たね最低1体・ACE SPEC合計1枚・基本エネルギー無制限）はcross_category_fields
+// （isAceSpec/isBasicEnergy、OCR共通スキーマ側で未実装）が揃ってから追加する。
+// 暫定措置：energyカテゴリは「基本エネルギー無制限」との切り分けが今はできないため、
+// 同名4枚チェックの対象から一旦除外している（cross_category_fields実装後に見直し予定）。
+//
+// 返り値の形（deckRuleViolations、既存のviolationsとは別物）：
+// ・デッキ全体用：{ reason: "total_count", count, expected }
+// ・カード単位用：{ reason: "same_name_over_limit", name, count, limit }
+async function validateDeckRules(cardList, env) {
+  const deckRuleViolations = [];
+
+  // ① デッキ合計60枚ちょうど
+  let totalCount = 0;
+  for (const category of CARD_LIST_CATEGORIES) {
+    const entries = cardList[category];
+    if (!entries) continue;
+    for (const entry of entries) {
+      totalCount += entry.count;
+    }
+  }
+  if (totalCount !== 60) {
+    deckRuleViolations.push({ reason: "total_count", count: totalCount, expected: 60 });
+  }
+
+  // ② 同名カード基本4枚まで（名前基準で合算。energyカテゴリは暫定除外・上記コメント参照）
+  const nameCountMap = new Map(); // name -> 合計count
+
+  for (const category of CARD_LIST_CATEGORIES) {
+    if (category === "energy") continue;
+    const entries = cardList[category];
+    if (!entries) continue;
+
+    for (const entry of entries) {
+      let name;
+      if (entry.provisional) {
+        name = entry.tempName;
+      } else {
+        const { card } = await getCardData(env, entry.cardId);
+        name = card ? card.name : entry.cardId; // 取得失敗時はcardIdで代用（card_not_foundはレギュ判定側で別途拾われる）
+      }
+      nameCountMap.set(name, (nameCountMap.get(name) || 0) + entry.count);
+    }
+  }
+
+  for (const [name, count] of nameCountMap.entries()) {
+    if (count > 4) {
+      deckRuleViolations.push({ reason: "same_name_over_limit", name, count, limit: 4 });
+    }
+  }
+
+  return deckRuleViolations;
+}
+// ▲ deckRules判定
+
 // ▼ id連番発行 (register_meta / register_mine / copy_mine 共通)
 // counter:mine / counter:meta を読んで type-XXX（3桁ゼロ埋め）を組み立てる。
 // 実データと重複してたら+1してリトライし、確定した番号の次からKV上のカウンターを更新する。
@@ -480,20 +540,23 @@ export default {
 
       applyProvisionalAwaitDefaults(cardList);
 
+      // 2026-07-21〜：MTGA方式に変更。違反があっても登録・保存はブロックせず、
+      // violations / deckRuleViolationsを警告として一緒に返すのみ（以前は400で弾いていた）。
       const regulationResult = await validateRegulationLegality(cardList, env);
-      if (!regulationResult.valid) {
-        return new Response(
-          JSON.stringify({ ok: false, error: "regulation_violation", violations: regulationResult.violations }),
-          { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-        );
-      }
+      const deckRuleViolations = await validateDeckRules(cardList, env);
 
       const id = await generateId(env, "meta");
       const key = "deck:meta:" + id;
 
       await env.KV.put(key, JSON.stringify({ id, name, cardList, howToPlay: howToPlay || "", deckCode: deckCode || "" }));
       return new Response(
-        JSON.stringify({ ok: true, saved: key, id }),
+        JSON.stringify({
+          ok: true,
+          saved: key,
+          id,
+          violations: regulationResult.violations,
+          deckRuleViolations
+        }),
         { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
@@ -666,20 +729,23 @@ if (getMetaHowToPlayId) {
 
       applyProvisionalAwaitDefaults(cardList);
 
+      // 2026-07-21〜：MTGA方式に変更。違反があっても登録・保存はブロックせず、
+      // violations / deckRuleViolationsを警告として一緒に返すのみ（以前は400で弾いていた）。
       const regulationResult = await validateRegulationLegality(cardList, env);
-      if (!regulationResult.valid) {
-        return new Response(
-          JSON.stringify({ ok: false, error: "regulation_violation", violations: regulationResult.violations }),
-          { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-        );
-      }
+      const deckRuleViolations = await validateDeckRules(cardList, env);
 
       const id = await generateId(env, "mine");
       const key = "deck:mine:" + id;
 
       await env.KV.put(key, JSON.stringify({ id, name, cardList, concern: concern || "" }));
       return new Response(
-        JSON.stringify({ ok: true, saved: key, id }),
+        JSON.stringify({
+          ok: true,
+          saved: key,
+          id,
+          violations: regulationResult.violations,
+          deckRuleViolations
+        }),
         { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
@@ -729,6 +795,9 @@ if (url.searchParams.get("update_mine") === "true") {
     }
   }
 
+  let violations = [];
+  let deckRuleViolations = [];
+
   if ("cardList" in body) {
     const cardListError = validateCardList(merged.cardList);
     if (cardListError) {
@@ -742,13 +811,11 @@ if (url.searchParams.get("update_mine") === "true") {
     // 初期値を埋める（既存のregisteredAtがあるものは上書きしない）。
     applyProvisionalAwaitDefaults(merged.cardList);
 
+    // 2026-07-21〜：MTGA方式に変更。違反があっても更新・保存はブロックせず、
+    // violations / deckRuleViolationsを警告として一緒に返すのみ（以前は400で弾いていた）。
     const regulationResult = await validateRegulationLegality(merged.cardList, env);
-    if (!regulationResult.valid) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "regulation_violation", violations: regulationResult.violations }),
-        { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-      );
-    }
+    violations = regulationResult.violations;
+    deckRuleViolations = await validateDeckRules(merged.cardList, env);
   }
 
   // 更新直前に1世代だけバックアップ退避
@@ -756,7 +823,7 @@ if (url.searchParams.get("update_mine") === "true") {
 
   await env.KV.put(key, JSON.stringify(merged));
   return new Response(
-    JSON.stringify({ ok: true, updated: key }),
+    JSON.stringify({ ok: true, updated: key, violations, deckRuleViolations }),
     { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
   );
 }
