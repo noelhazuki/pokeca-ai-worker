@@ -588,12 +588,6 @@ ${openConcerns.length ? openConcerns.join("\n") : "（なし）"}
   const textBlock = (data.content || []).find((b) => b.type === "text");
   const rawText = textBlock ? textBlock.text : "";
 
-  // ▼ 2026-07-22 一時デバッグ：answerが空になる原因調査用。原因特定後に削除すること
-  if (!rawText) {
-    return { answer: "", newConcerns: [], _debug: data };
-  }
-  // ▲ 一時デバッグ
-
   // JSONパース失敗時のフォールバック：素の文章をそのままanswerとして返す（newConcernsは空扱い）
   try {
     const parsed = JSON.parse(rawText.trim());
@@ -1628,7 +1622,7 @@ if (url.searchParams.get("ask") === "true") {
     await env.KV.put(key, JSON.stringify({ ...deck, openConcerns: updatedConcerns }));
 
     return new Response(
-      JSON.stringify({ ok: true, answer: claudeResult.answer, newConcerns: claudeResult.newConcerns, _debug: claudeResult._debug }),
+      JSON.stringify({ ok: true, answer: claudeResult.answer, newConcerns: claudeResult.newConcerns }),
       { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   } catch (e) {
