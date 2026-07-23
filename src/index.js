@@ -522,8 +522,30 @@ async function generateCopyName(env, sourceName, type) {
 }
 // ▲ コピー時自動命名
 
+// ▼ ポケモンカード詳細テキスト化ヘルパー（?ask用。HP・タイプ・特性・わざを1行にまとめる）
+// 2026-07-23追加：AIがカード名だけで役割を推測して誤答するのを防ぐため、
+// 実際のカードテキストをそのまま渡す方式に変更（A案。役割タグ分類はideas.mdの今後検討へ）
+function buildPokemonDetail(card) {
+  const parts = [];
+  if (card.hp) parts.push(`HP${card.hp}`);
+  if (Array.isArray(card.types) && card.types.length) parts.push(`タイプ:${card.types.join("/")}`);
+  if (Array.isArray(card.abilities) && card.abilities.length) {
+    for (const ab of card.abilities) {
+      parts.push(`特性「${ab.name}」:${ab.effect}`);
+    }
+  }
+  if (Array.isArray(card.attacks) && card.attacks.length) {
+    for (const atk of card.attacks) {
+      const dmg = atk.damage ? `${atk.damage}ダメージ` : "";
+      parts.push(`わざ「${atk.name}」${dmg}${atk.effect ? "：" + atk.effect : ""}`);
+    }
+  }
+  return parts.join("、");
+}
+// ▲ ポケモンカード詳細テキスト化ヘルパー
+
 // ▼ ask用ヘルパー：cardList → カード名の一覧テキスト化
-// 既存get_cardにcardId全件をそのまま回す素直な方式（大半KVヒットのためコスト影響小）
+// 2026-07-23変更：ポケモンカードのみHP・タイプ・特性・わざのテキストを付与する（トレーナーズ・エネは名前のみで変更なし）
 // provisionalカード（cardId未確定）はtempNameをそのまま使う
 async function buildCardListSummary(cardList, env) {
   const lines = [];
@@ -534,7 +556,12 @@ async function buildCardListSummary(cardList, env) {
       if (item.cardId) {
         const { card } = await getCardData(env, item.cardId);
         const name = card ? card.name : item.cardId;
-        lines.push(`${name} ×${item.count}`);
+        if (category === "pokemon" && card) {
+          const detail = buildPokemonDetail(card);
+          lines.push(detail ? `${name} ×${item.count}（${detail}）` : `${name} ×${item.count}`);
+        } else {
+          lines.push(`${name} ×${item.count}`);
+        }
       } else if (item.tempName) {
         lines.push(`${item.tempName} ×${item.count}（未確定カード）`);
       }
