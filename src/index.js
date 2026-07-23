@@ -545,7 +545,9 @@ async function buildCardListSummary(cardList, env) {
 // ▲ cardList → カード名の一覧テキスト化
 
 // ▼ ask用ヘルパー：Claude API呼び出し
-// レスポンスはJSON構造化{answer, newConcerns}で受け取る方式に確定（2026-07-22）。
+// レスポンスはJSON構造化{answer, topics, newConcerns}で受け取る方式に確定（2026-07-23）。
+// topics追加の背景：answer1本だと長文化しやすく、チャットUI上で読みにくいため、
+// 「短い一言（answer）」＋「見出しタップで開く詳細（topics）」の2層構造に変更。
 // newConcernsの抽出は別ロジックを作らず、AI自身に構造化出力させる。
 async function callAskClaude(env, { deckName, cardListSummary, openConcerns, question }) {
   const systemPrompt = `あなたはポケモンカードゲームのデッキ構築アドバイザーです。
@@ -562,7 +564,13 @@ ${openConcerns.length ? openConcerns.join("\n") : "（なし）"}
 
 # 出力形式
 必ず以下のJSON形式のみで出力すること。前置き・説明・Markdownのコードブロック記号は一切付けないでください。
-{"answer": "質問への回答文", "newConcerns": ["今回の回答の中で新たに気づいた未解決の懸念点。無ければ空配列"]}`;
+{"answer": "質問への回答の要約（1〜2文の短い一言）", "topics": [{"title": "見出し（15字程度）", "detail": "その見出しの詳細説明"}], "newConcerns": ["今回の回答の中で新たに気づいた未解決の懸念点。無ければ空配列"]}
+
+# answer・topicsの使い分け
+- answerには必ず結論や要約を短く書くこと（長文にしない）
+- 質問の内容が複数の観点に分かれる場合（弱点が複数ある、改善案が複数ある等）は、観点ごとにtopicsへ分割すること
+- 質問が単一の論点で完結し、answerだけで十分に答えきれる場合は、topicsは空配列 [] にすること（無理に分割しない）
+- topicsの各detailは、answerで触れた内容を掘り下げる形にし、answerと同じ内容の繰り返しにしないこと`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -588,15 +596,16 @@ ${openConcerns.length ? openConcerns.join("\n") : "（なし）"}
   const textBlock = (data.content || []).find((b) => b.type === "text");
   const rawText = textBlock ? textBlock.text : "";
 
-  // JSONパース失敗時のフォールバック：素の文章をそのままanswerとして返す（newConcernsは空扱い）
+  // JSONパース失敗時のフォールバック：素の文章をそのままanswerとして返す（topics・newConcernsは空扱い）
   try {
     const parsed = JSON.parse(rawText.trim());
     return {
       answer: parsed.answer || rawText,
+      topics: Array.isArray(parsed.topics) ? parsed.topics : [],
       newConcerns: Array.isArray(parsed.newConcerns) ? parsed.newConcerns : []
     };
   } catch (e) {
-    return { answer: rawText, newConcerns: [] };
+    return { answer: rawText, topics: [], newConcerns: [] };
   }
 }
 // ▲ Claude API呼び出し
@@ -1622,7 +1631,7 @@ if (url.searchParams.get("ask") === "true") {
     await env.KV.put(key, JSON.stringify({ ...deck, openConcerns: updatedConcerns }));
 
     return new Response(
-      JSON.stringify({ ok: true, answer: claudeResult.answer, newConcerns: claudeResult.newConcerns }),
+      JSON.stringify({ ok: true, answer: claudeResult.answer, topics: claudeResult.topics, newConcerns: claudeResult.newConcerns }),
       { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   } catch (e) {
