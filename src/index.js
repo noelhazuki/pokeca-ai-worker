@@ -522,11 +522,21 @@ async function generateCopyName(env, sourceName, type) {
 }
 // ▲ コピー時自動命名
 
-// ▼ ポケモンカード詳細テキスト化ヘルパー（?ask用。HP・タイプ・特性・わざを1行にまとめる）
+// ▼ ポケモンカード詳細テキスト化ヘルパー（?ask用。進化段階・HP・タイプ・特性・わざを1行にまとめる）
 // 2026-07-23追加：AIがカード名だけで役割を推測して誤答するのを防ぐため、
 // 実際のカードテキストをそのまま渡す方式に変更（A案。役割タグ分類はideas.mdの今後検討へ）
+// 2026-07-24追記：進化段階（stage）はTCGdexから取得済みでvalidateDeckRules側では既に使っていたが、
+// ?ask用のこの関数には渡っておらず、AIが進化ラインを名前から推測して誤答する原因になっていた。
+// stage・evolveFromを追加してAIの推測依存を減らす。
+// 進化段階の英語stage値→日本語表記変換（TCGdexの表記に合わせる。未知の値はそのまま素通し）
+const STAGE_LABELS = { Basic: "たね", Stage1: "1進化", Stage2: "2進化" };
+
 function buildPokemonDetail(card) {
   const parts = [];
+  if (card.stage) {
+    const stageLabel = STAGE_LABELS[card.stage] || card.stage;
+    parts.push(card.evolveFrom ? `${stageLabel}（${card.evolveFrom}から進化）` : stageLabel);
+  }
   if (card.hp) parts.push(`HP${card.hp}`);
   if (Array.isArray(card.types) && card.types.length) parts.push(`タイプ:${card.types.join("/")}`);
   if (Array.isArray(card.abilities) && card.abilities.length) {
