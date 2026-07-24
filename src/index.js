@@ -571,12 +571,65 @@ async function buildCardListSummary(cardList, env) {
 }
 // ▲ cardList → カード名の一覧テキスト化
 
+// ▼ manualCardRules用ヘルパー：cardListに登録済みのカード名を集める（依存型/禁止型/自己言及型の判定用）
+async function collectDeckCardNames(cardList, env) {
+  const names = new Set();
+  for (const category of CARD_LIST_CATEGORIES) {
+    const items = cardList[category];
+    if (!Array.isArray(items)) continue;
+    for (const item of items) {
+      if (item.cardId) {
+        const { card } = await getCardData(env, item.cardId);
+        if (card) names.add(card.name);
+      } else if (item.tempName) {
+        names.add(item.tempName);
+      }
+    }
+  }
+  return names;
+}
+// ▲ manualCardRules用ヘルパー：デッキ内カード名収集
+
+// ▼ manualCardRules照合ヘルパー：デッキ内容とmanualCardRulesを突き合わせ、該当する注意点をテキスト化する
+// 参照タイミングは?ask専用（2026-07-24確定）。登録時のバリデーション（register/update）には使わない。
+// judgeType（依存型/禁止型/自己言及型）ごとにグループ分けされたKV構造をそのまま走査する。
+// 自己言及型のスタジアムのみcategoryWide:"stadiums"の特殊レコード（個別カード名を持たない）。
+async function buildManualCardRuleNotes(cardList, env) {
+  const raw = await env.KV.get("manualCardRules");
+  if (!raw) return [];
+
+  const rules = JSON.parse(raw);
+  const deckNames = await collectDeckCardNames(cardList, env);
+  const stadiumsInDeck = Array.isArray(cardList.stadiums) && cardList.stadiums.length > 0;
+  const notes = [];
+
+  for (const judgeType of Object.keys(rules)) {
+    const entries = rules[judgeType];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (entry.categoryWide === "stadiums") {
+        if (stadiumsInDeck) {
+          notes.push(`[${judgeType}/${entry.weight}] スタジアム使用時の注意：${entry.constraintNote}`);
+        }
+        continue;
+      }
+      if (entry.cardName && deckNames.has(entry.cardName)) {
+        const target = entry.targetCard ? `（対象：${entry.targetCard}）` : "";
+        notes.push(`[${judgeType}/${entry.weight}] ${entry.cardName}${target}：${entry.constraintNote}`);
+      }
+    }
+  }
+
+  return notes;
+}
+// ▲ manualCardRules照合ヘルパー
+
 // ▼ ask用ヘルパー：Claude API呼び出し
 // レスポンスはJSON構造化{answer, topics, newConcerns}で受け取る方式に確定（2026-07-23）。
 // topics追加の背景：answer1本だと長文化しやすく、チャットUI上で読みにくいため、
 // 「短い一言（answer）」＋「見出しタップで開く詳細（topics）」の2層構造に変更。
 // newConcernsの抽出は別ロジックを作らず、AI自身に構造化出力させる。
-async function callAskClaude(env, { deckName, cardListSummary, openConcerns, question }) {
+async function callAskClaude(env, { deckName, cardListSummary, openConcerns, manualNotes, question }) {
   const systemPrompt = `あなたはポケモンカードゲームのデッキ構築アドバイザーです。
 以下のデッキ内容とこれまでの未解決の懸念点を踏まえて、ユーザーの質問に答えてください。
 
@@ -585,6 +638,9 @@ ${deckName}
 
 # デッキの中身
 ${cardListSummary.join("\n")}
+
+# このデッキで気をつけるべき点（人力登録リストより。質問と関係あれば参考にすること）
+${manualNotes.length ? manualNotes.join("\n") : "（該当なし）"}
 
 # これまでの未解決の懸念点
 ${openConcerns.length ? openConcerns.join("\n") : "（なし）"}
@@ -1649,10 +1705,12 @@ if (url.searchParams.get("ask") === "true") {
 
   try {
     const cardListSummary = await buildCardListSummary(deck.cardList, env);
+    const manualNotes = await buildManualCardRuleNotes(deck.cardList, env);
     const claudeResult = await callAskClaude(env, {
       deckName: deck.name,
       cardListSummary,
       openConcerns,
+      manualNotes,
       question
     });
 
