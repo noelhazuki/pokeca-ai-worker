@@ -639,7 +639,9 @@ async function buildManualCardRuleNotes(cardList, env) {
 // topics追加の背景：answer1本だと長文化しやすく、チャットUI上で読みにくいため、
 // 「短い一言（answer）」＋「見出しタップで開く詳細（topics）」の2層構造に変更。
 // newConcernsの抽出は別ロジックを作らず、AI自身に構造化出力させる。
-async function callAskClaude(env, { deckName, cardListSummary, openConcerns, manualNotes, question }) {
+// 2026-07-25：単発questionではなくmessages配列（session:{deckId}のturnsから組み立てた会話履歴＋今回の質問）を渡す方式に変更。
+// クライアント側スティッチング（questionに全履歴を埋め込む）はやめ、Claude APIのmessages配列本来の複数ターン機能を使う。
+async function callAskClaude(env, { deckName, cardListSummary, openConcerns, manualNotes, messages }) {
   const systemPrompt = `あなたはポケモンカードゲームのデッキ構築アドバイザーです。
 以下のデッキ内容とこれまでの未解決の懸念点を踏まえて、ユーザーの質問に答えてください。
 
@@ -653,7 +655,7 @@ ${cardListSummary.join("\n")}
 ${manualNotes.length ? manualNotes.join("\n") : "（該当なし）"}
 
 # これまでの未解決の懸念点
-${openConcerns.length ? openConcerns.join("\n") : "（なし）"}
+${openConcerns.length ? openConcerns.map((c) => c.text).join("\n") : "（なし）"}
 
 # 出力形式
 必ず以下のJSON形式のみで出力すること。前置き・説明・Markdownのコードブロック記号は一切付けないでください。
@@ -665,7 +667,8 @@ ${openConcerns.length ? openConcerns.join("\n") : "（なし）"}
 - 質問者が聞いていない追加情報（デッキ内の関連カードの補足、念のための注意点、ついでのアドバイス等）を自主的に見つけても、それだけを理由にtopicsへ分割しないこと。答えていない論点を勝手に増やさない
 - 質問が一問一答（Yes/No、枚数、可否など）で成立する場合は、余地があるように見えてもtopicsは空配列 [] にすること。補足情報を伝えたい場合はanswer内に一言で収めるか、newConcernsに回すこと
 - 判断に迷う場合は分割しない方を選ぶこと（topicsは空配列がデフォルト）
-- topicsの各detailは、answerで触れた内容を掘り下げる形にし、answerと同じ内容の繰り返しにしないこと`;
+- topicsの各detailは、answerで触れた内容を掘り下げる形にし、answerと同じ内容の繰り返しにしないこと
+- 過去のターンのassistant発言は、実際には{answer,topics,newConcerns}のJSON構造で返したものだが、会話履歴上はanswerのテキストのみを渡している。文脈把握にはそれで十分なので、過去のJSON構造を気にする必要はない`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -678,7 +681,7 @@ ${openConcerns.length ? openConcerns.join("\n") : "（なし）"}
       model: "claude-sonnet-5",
       max_tokens: 4096,
       system: systemPrompt,
-      messages: [{ role: "user", content: question }]
+      messages
     })
   });
 
@@ -704,6 +707,25 @@ ${openConcerns.length ? openConcerns.join("\n") : "（なし）"}
   }
 }
 // ▲ Claude API呼び出し
+
+// ▼ ask用ヘルパー：session:{deckId}（会話履歴）の読み書き
+// 1デッキ＝1セッション固定（複数スレッドは持たない、2026-07-25確定）。
+// 「新しく相談始める」ボタン押下時（?reset_ask_session=true）は上書きし、前セッションのturnsは残さない。
+function defaultAskSession(deckId) {
+  const now = new Date().toISOString();
+  return { deckId, createdAt: now, updatedAt: now, turns: [] };
+}
+
+async function getAskSession(env, deckId) {
+  const raw = await env.KV.get("session:" + deckId);
+  if (!raw) return defaultAskSession(deckId);
+  return JSON.parse(raw);
+}
+
+async function saveAskSession(env, session) {
+  await env.KV.put("session:" + session.deckId, JSON.stringify(session));
+}
+// ▲ session:{deckId}の読み書き
 
 export default {
   async fetch(request, env) {
@@ -1682,7 +1704,7 @@ if (url.searchParams.get("recheck_all") === "true") {
 }
 // ▲ レギュ再チェック一括 (recheck_all)
 
-// ▼ デッキ構築相談 (ask) - 2026-07-22実装
+// ▼ デッキ構築相談 (ask) - 2026-07-22実装、2026-07-25にsession・category・openConcerns構造対応を追加
 if (url.searchParams.get("ask") === "true") {
   if (request.method !== "POST") {
     return new Response(
@@ -1692,7 +1714,7 @@ if (url.searchParams.get("ask") === "true") {
   }
 
   const body = await request.json();
-  const { deckId, question } = body;
+  const { deckId, question, category } = body;
 
   if (!deckId || !question) {
     return new Response(
@@ -1713,22 +1735,55 @@ if (url.searchParams.get("ask") === "true") {
   const deck = JSON.parse(raw);
   const openConcerns = deck.openConcerns || [];
 
+  // category付きの時は「{major}カテゴリの{sub}の相談：{freeText}」形式に結合（2026-07-23設計確定）
+  const combinedQuestion = category
+    ? `「${category.major}カテゴリの${category.sub}の相談：${question}」`
+    : question;
+
   try {
     const cardListSummary = await buildCardListSummary(deck.cardList, env);
     const manualNotes = await buildManualCardRuleNotes(deck.cardList, env);
+
+    // session:{deckId}のturnsから会話履歴を組み立て、今回の質問を末尾に足す（クライアント側スティッチングは廃止）
+    const session = await getAskSession(env, deckId);
+    const conversationMessages = session.turns.flatMap((t) => [
+      { role: "user", content: t.question },
+      { role: "assistant", content: t.answer }
+    ]);
+    conversationMessages.push({ role: "user", content: combinedQuestion });
+
     const claudeResult = await callAskClaude(env, {
       deckName: deck.name,
       cardListSummary,
       openConcerns,
       manualNotes,
-      question
+      messages: conversationMessages
     });
 
-    const updatedConcerns = [...openConcerns, ...claudeResult.newConcerns];
+    // newConcernsは文字列配列で返ってくるので、id・categoryを付与してopenConcernsの正式構造にする
+    const newConcernObjs = claudeResult.newConcerns.map((text) => ({
+      id: crypto.randomUUID(),
+      text,
+      category: category || null
+    }));
+    const updatedConcerns = [...openConcerns, ...newConcernObjs];
     await env.KV.put(key, JSON.stringify({ ...deck, openConcerns: updatedConcerns }));
 
+    // 今回のターンをsessionへ追加保存
+    const timestamp = new Date().toISOString();
+    session.turns.push({
+      question: combinedQuestion,
+      category: category || null,
+      answer: claudeResult.answer,
+      topics: claudeResult.topics,
+      newConcernIds: newConcernObjs.map((c) => c.id),
+      timestamp
+    });
+    session.updatedAt = timestamp;
+    await saveAskSession(env, session);
+
     return new Response(
-      JSON.stringify({ ok: true, answer: claudeResult.answer, topics: claudeResult.topics, newConcerns: claudeResult.newConcerns }),
+      JSON.stringify({ ok: true, answer: claudeResult.answer, topics: claudeResult.topics, newConcerns: newConcernObjs }),
       { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   } catch (e) {
@@ -1739,6 +1794,81 @@ if (url.searchParams.get("ask") === "true") {
   }
 }
 // ▲ デッキ構築相談 (ask)
+
+// ▼ ask会話セッションのリセット (reset_ask_session) - 2026-07-25実装
+// 「新しく相談始める」ボタン押下時に呼ぶ。session:{deckId}を空のセッションで上書きし、前のturnsは残さない
+if (url.searchParams.get("reset_ask_session") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { deckId } = body;
+
+  if (!deckId) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "deckIdは必須やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const freshSession = defaultAskSession(deckId);
+  await saveAskSession(env, freshSession);
+
+  return new Response(
+    JSON.stringify({ ok: true, session: freshSession }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ ask会話セッションのリセット
+
+// ▼ openConcernsの解決判定 (resolve_concerns) - 2026-07-25実装
+// 入力：{deckId, ids:[...]}。見つかったidは削除、見つからんかったidはnotFoundIdsで返す（部分スキップ、全体は止めない）
+if (url.searchParams.get("resolve_concerns") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { deckId, ids } = body;
+
+  if (!deckId || !Array.isArray(ids) || ids.length === 0) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "idsが空です" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const key = "deck:mine:" + deckId;
+  const raw = await env.KV.get(key);
+  if (!raw) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `deckId "${deckId}" は見つからんかったで` }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const deck = JSON.parse(raw);
+  const openConcerns = deck.openConcerns || [];
+  const idSet = new Set(ids);
+  const foundIds = new Set(openConcerns.filter((c) => idSet.has(c.id)).map((c) => c.id));
+  const notFoundIds = ids.filter((id) => !foundIds.has(id));
+  const updatedConcerns = openConcerns.filter((c) => !idSet.has(c.id));
+
+  await env.KV.put(key, JSON.stringify({ ...deck, openConcerns: updatedConcerns }));
+
+  return new Response(
+    JSON.stringify({ ok: true, openConcerns: updatedConcerns, notFoundIds }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ openConcernsの解決判定
 
     return new Response("ok", { headers: { "Content-Type": "text/plain", ...CORS_HEADERS } });
   }
