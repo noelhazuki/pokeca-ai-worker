@@ -670,6 +670,11 @@ ${openConcerns.length ? openConcerns.map((c) => c.text).join("\n") : "（なし�
 - topicsの各detailは、answerで触れた内容を掘り下げる形にし、answerと同じ内容の繰り返しにしないこと
 - 過去のターンのassistant発言は、実際には{answer,topics,newConcerns}のJSON構造で返したものだが、会話履歴上はanswerのテキストのみを渡している。文脈把握にはそれで十分なので、過去のJSON構造を気にする必要はない`;
 
+  // 2026-07-25：会話が続くとAIが指示を無視して素の文章＋JSONを両方出力し、パース失敗する事故が実機テストで発覚。
+  // 対策として、assistant側の発言を「{」から始まったことにしておく（プレフィル）ことで、
+  // モデルに「もうJSONの中に入ってる」と認識させ、前置き文を書かせないようにする。
+  const messagesWithPrefill = [...messages, { role: "assistant", content: "{" }];
+
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -681,7 +686,7 @@ ${openConcerns.length ? openConcerns.map((c) => c.text).join("\n") : "（なし�
       model: "claude-sonnet-5",
       max_tokens: 4096,
       system: systemPrompt,
-      messages
+      messages: messagesWithPrefill
     })
   });
 
@@ -692,9 +697,11 @@ ${openConcerns.length ? openConcerns.map((c) => c.text).join("\n") : "（なし�
 
   const data = await res.json();
   const textBlock = (data.content || []).find((b) => b.type === "text");
-  const rawText = textBlock ? textBlock.text : "";
+  // プレフィルで送った「{」はレスポンスに含まれず続きだけが返るので、こちらで頭に戻して繋げる
+  const rawText = "{" + (textBlock ? textBlock.text : "");
 
-  // JSONパース失敗時のフォールバック：素の文章をそのままanswerとして返す（topics・newConcernsは空扱い）
+  // パース失敗時のフォールバック：素のJSON.parseがダメでも、文中から最初の{〜最後の}を抜き出して再挑戦する。
+  // それでもダメなら、素の文章をそのままanswerとして返す（topics・newConcernsは空扱い）
   try {
     const parsed = JSON.parse(rawText.trim());
     return {
@@ -703,6 +710,19 @@ ${openConcerns.length ? openConcerns.map((c) => c.text).join("\n") : "（なし�
       newConcerns: Array.isArray(parsed.newConcerns) ? parsed.newConcerns : []
     };
   } catch (e) {
+    const match = rawText.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        const parsed = JSON.parse(match[0]);
+        return {
+          answer: parsed.answer || rawText,
+          topics: Array.isArray(parsed.topics) ? parsed.topics : [],
+          newConcerns: Array.isArray(parsed.newConcerns) ? parsed.newConcerns : []
+        };
+      } catch (e2) {
+        // 抽出後もダメなら素通し
+      }
+    }
     return { answer: rawText, topics: [], newConcerns: [] };
   }
 }
