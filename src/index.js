@@ -121,6 +121,93 @@ function applyProvisionalAwaitDefaults(cardList) {
 // 心配がない。pidが渡されてきた場合はpid一致のみで特定し、tempName/setInfoは見ない
 // （categoryも実質不要だが、呼び出し側の互換のため引数自体は残す）。
 // pidが渡されなかった場合は、pid実装前に登録された古いprovisionalとの互換のため、
+// 従来通りcategory＋tempName＋setInf      if (typeof entry.count !== "number" || !Number.isInteger(entry.count) || entry.count < 1) {
+        return `cardList.${category}のcountは1以上の整数にしてな`;
+      }
+      // 仮登録エントリー（TCGdex未収録 or 照合未実施）：cardId無し、tempNameのみ必須
+      if (entry.provisional === true) {
+        if (typeof entry.tempName !== "string" || entry.tempName.trim() === "") {
+          return `cardList.${category}の仮登録要素にtempName（文字列）が無いで`;
+        }
+        // awaitStatus/waitDaysは任意項目（無ければapplyProvisionalAwaitDefaultsで初期値が入る）。
+        // 送られてきた場合のみ型チェックする。
+        if ("awaitStatus" in entry && entry.awaitStatus !== "waiting" && entry.awaitStatus !== "manual") {
+          return `cardList.${category}の仮登録要素のawaitStatusは'waiting'か'manual'にしてな`;
+        }
+        if ("waitDays" in entry && (typeof entry.waitDays !== "number" || !Number.isInteger(entry.waitDays) || entry.waitDays < 1)) {
+          return `cardList.${category}の仮登録要素のwaitDaysは1以上の整数にしてな`;
+        }
+        continue;
+      }
+      if (typeof entry.cardId !== "string" || entry.cardId.trim() === "") {
+        return `cardList.${category}にcardId（文字列）が無い要素があるで`;
+      }
+    }
+  }
+
+  return null; // 問題なし
+}
+// ▲ cardList検証 (register_meta / register_mine 共通)
+
+// ▼ provisional awaitStatus初期値付与 (register_meta / register_mine / update_mine 共通)
+// 2026-07-20設計確定分の実装。provisionalエントリーにregisteredAt/awaitStatus/waitDaysが
+// 無ければ、登録・更新のこの時点で初期値を埋める。既に値が入っている場合（recheck_mine後の
+// 再保存や、manual切替ボタンからの部分更新等）は上書きしない＝呼んでも安全な「不足分だけ埋める」関数。
+// - registeredAt: 未指定ならこの関数を呼んだ時刻をISO文字列で記録（サーバー側の時刻を正とする）
+// - awaitStatus: 明示的に'manual'が送られてきた場合のみそちらを採用。それ以外（未指定 or 不正値）は'waiting'
+// - waitDays: 未指定 or 不正値なら30日固定（デフォルト）
+// - pid: 2026-07-21追加。tempName＋setInfoの表記ゆれ対策で、provisionalエントリーごとに
+//   デッキ内で一意な背番号（p1, p2…）を振る。カテゴリを跨いで通し番号（ポケモンのp3の次は
+//   グッズでもp4、という具合）。既にpidを持つエントリー（recheck_mine後の再保存等）は
+//   上書きせず、無いものだけ採番する。採番前に既存の最大番号を一度スキャンしてから
+//   続き番号を割り当てるので、update_mineで後から増えたprovisionalにも重複なく振れる。
+function applyProvisionalAwaitDefaults(cardList) {
+  const now = new Date().toISOString();
+
+  let maxPid = 0;
+  for (const category of CARD_LIST_CATEGORIES) {
+    const entries = cardList[category];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (entry.provisional !== true) continue;
+      if (typeof entry.pid === "string" && /^p\d+$/.test(entry.pid)) {
+        const n = parseInt(entry.pid.slice(1), 10);
+        if (n > maxPid) maxPid = n;
+      }
+    }
+  }
+
+  for (const category of CARD_LIST_CATEGORIES) {
+    const entries = cardList[category];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (entry.provisional !== true) continue;
+      if (!entry.registeredAt) entry.registeredAt = now;
+      if (entry.awaitStatus !== "manual") entry.awaitStatus = "waiting";
+      if (typeof entry.waitDays !== "number" || !Number.isInteger(entry.waitDays) || entry.waitDays < 1) {
+        entry.waitDays = 30;
+      }
+      if (typeof entry.pid !== "string" || entry.pid.trim() === "") {
+        maxPid += 1;
+        entry.pid = `p${maxPid}`;
+      }
+    }
+  }
+  return cardList;
+}
+// ▲ provisional awaitStatus初期値付与
+
+// ▼ provisional対象特定ヘルパー (set_manual / update_wait_days 共通)
+// category＋tempName＋setInfoの完全一致で、cardList内から該当する1件のprovisionalエントリーを探す。
+// setInfoの比較先はカテゴリによって違う点に注意：ポケモンはentry.setInfo、トレーナーズ／エネはentry.setCode。
+// （呼び出し側は両方とも同じ"setInfo"という名前でリクエストを送ってくる想定。データ構造上の名前の違いはこの関数が吸収する）
+// 見つからなければnullを返す。
+//
+// 2026-07-21追記：pid（p1,p2…の背番号）による特定ルートを追加。tempNameは人間が入力した
+// テキストなので表記ゆれ（末尾スペース等）で完全一致に失敗するケースがあり、pidならその
+// 心配がない。pidが渡されてきた場合はpid一致のみで特定し、tempName/setInfoは見ない
+// （categoryも実質不要だが、呼び出し側の互換のため引数自体は残す）。
+// pidが渡されなかった場合は、pid実装前に登録された古いprovisionalとの互換のため、
 // 従来通りcategory＋tempName＋setInfoの完全一致にフォールバックする。
 function findProvisionalEntry(cardList, category, tempName, setInfo, pid) {
   const entries = cardList?.[category];
