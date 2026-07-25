@@ -658,8 +658,7 @@ ${manualNotes.length ? manualNotes.join("\n") : "（該当なし）"}
 ${openConcerns.length ? openConcerns.map((c) => c.text).join("\n") : "（なし）"}
 
 # 出力形式
-必ず以下のJSON形式のみで出力すること。前置き・説明・Markdownのコードブロック記号は一切付けないでください。
-{"answer": "質問への回答の要約（1〜2文の短い一言）", "topics": [{"title": "見出し（15字程度）", "detail": "その見出しの詳細説明"}], "newConcerns": ["今回の回答の中で新たに気づいた未解決の懸念点。無ければ空配列"]}
+必ずsubmit_answerツールを使って回答すること。文章での直接返答はしないこと。
 
 # answer・topicsの使い分け
 - answerには必ず結論や要約を短く書くこと（長文にしない）
@@ -671,9 +670,38 @@ ${openConcerns.length ? openConcerns.map((c) => c.text).join("\n") : "（なし�
 - 過去のターンのassistant発言は、実際には{answer,topics,newConcerns}のJSON構造で返したものだが、会話履歴上はanswerのテキストのみを渡している。文脈把握にはそれで十分なので、過去のJSON構造を気にする必要はない`;
 
   // 2026-07-25：会話が続くとAIが指示を無視して素の文章＋JSONを両方出力し、パース失敗する事故が実機テストで発覚。
-  // 対策として、assistant側の発言を「{」から始まったことにしておく（プレフィル）ことで、
-  // モデルに「もうJSONの中に入ってる」と認識させ、前置き文を書かせないようにする。
-  const messagesWithPrefill = [...messages, { role: "assistant", content: "{" }];
+  // プレフィル（assistant発言を「{」から始めさせる案）はこのモデルで拒否された（「会話はuserメッセージで
+  // 終わらないとダメ」という制約があるため使用不可）。代わりにtool use（構造化出力の強制）方式に変更。
+  // submit_answerというツールを1個だけ渡し、tool_choiceでそれを強制する。AIの返答はtool_use.inputに
+  // 最初からJSオブジェクトとして入ってくるので、テキストのJSON.parseが丸ごと不要になる（一番堅い方式）。
+  const submitAnswerTool = {
+    name: "submit_answer",
+    description: "デッキ相談への回答を提出する",
+    input_schema: {
+      type: "object",
+      properties: {
+        answer: { type: "string", description: "質問への回答の要約（1〜2文の短い一言）" },
+        topics: {
+          type: "array",
+          description: "補足が必要な場合のみ使う見出し＋詳細のペア。不要なら空配列",
+          items: {
+            type: "object",
+            properties: {
+              title: { type: "string", description: "見出し（15字程度）" },
+              detail: { type: "string", description: "その見出しの詳細説明" }
+            },
+            required: ["title", "detail"]
+          }
+        },
+        newConcerns: {
+          type: "array",
+          description: "今回の回答の中で新たに気づいた未解決の懸念点。無ければ空配列",
+          items: { type: "string" }
+        }
+      },
+      required: ["answer", "topics", "newConcerns"]
+    }
+  };
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -686,7 +714,9 @@ ${openConcerns.length ? openConcerns.map((c) => c.text).join("\n") : "（なし�
       model: "claude-sonnet-5",
       max_tokens: 4096,
       system: systemPrompt,
-      messages: messagesWithPrefill
+      messages,
+      tools: [submitAnswerTool],
+      tool_choice: { type: "tool", name: "submit_answer" }
     })
   });
 
@@ -696,35 +726,20 @@ ${openConcerns.length ? openConcerns.map((c) => c.text).join("\n") : "（なし�
   }
 
   const data = await res.json();
-  const textBlock = (data.content || []).find((b) => b.type === "text");
-  // プレフィルで送った「{」はレスポンスに含まれず続きだけが返るので、こちらで頭に戻して繋げる
-  const rawText = "{" + (textBlock ? textBlock.text : "");
+  const toolBlock = (data.content || []).find((b) => b.type === "tool_use" && b.name === "submit_answer");
 
-  // パース失敗時のフォールバック：素のJSON.parseがダメでも、文中から最初の{〜最後の}を抜き出して再挑戦する。
-  // それでもダメなら、素の文章をそのままanswerとして返す（topics・newConcernsは空扱い）
-  try {
-    const parsed = JSON.parse(rawText.trim());
-    return {
-      answer: parsed.answer || rawText,
-      topics: Array.isArray(parsed.topics) ? parsed.topics : [],
-      newConcerns: Array.isArray(parsed.newConcerns) ? parsed.newConcerns : []
-    };
-  } catch (e) {
-    const match = rawText.match(/\{[\s\S]*\}/);
-    if (match) {
-      try {
-        const parsed = JSON.parse(match[0]);
-        return {
-          answer: parsed.answer || rawText,
-          topics: Array.isArray(parsed.topics) ? parsed.topics : [],
-          newConcerns: Array.isArray(parsed.newConcerns) ? parsed.newConcerns : []
-        };
-      } catch (e2) {
-        // 抽出後もダメなら素通し
-      }
-    }
-    return { answer: rawText, topics: [], newConcerns: [] };
+  // tool_useが来なかった場合（想定外エラー時等）のフォールバック：テキストブロックがあればそれをanswerとして返す
+  if (!toolBlock) {
+    const textBlock = (data.content || []).find((b) => b.type === "text");
+    return { answer: textBlock ? textBlock.text : "（AIから回答が得られへんかった）", topics: [], newConcerns: [] };
   }
+
+  const input = toolBlock.input || {};
+  return {
+    answer: input.answer || "",
+    topics: Array.isArray(input.topics) ? input.topics : [],
+    newConcerns: Array.isArray(input.newConcerns) ? input.newConcerns : []
+  };
 }
 // ▲ Claude API呼び出し
 
