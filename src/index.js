@@ -197,6 +197,26 @@ const OCR_CONVERSION_TABLE = {
 // 参照するフィールド（name / regulationMark / stage / energyType）だけは必ず揃える。
 // 変換表に無い値が来た場合はnullを返し、呼び出し側でスキップ扱いにする（黙って適当な値を入れない）。
 function convertOcrCardToTcgdex(ocrCard, setId) {
+  // 基本エネルギーだけ先に特殊処理する。基本エネルギーは実物のカードにsetInfo（カード番号）が
+  // 印刷されておらず、代わりに略号（LIG等）のみが入っている。また、同じ働きの基本エネルギーが
+  // 商品ごとに絵柄違いで何度も封入されるため、絵柄単位でcardIdを分けず、pokeType（属性）から
+  // 作った固定IDに正規化して使い回す（2026-07-26確定）。レギュマークもレギュ不問のためnull固定。
+  if (ocrCard.cardType === "energy" && ocrCard.energyKind === "基本") {
+    const type = OCR_CONVERSION_TABLE.pokeType[ocrCard.pokeType];
+    if (!type) return { error: `pokeType「${ocrCard.pokeType}」が変換表に無い` };
+    return {
+      card: {
+        id: "Energy-" + type,
+        name: ocrCard.name,
+        regulationMark: null,
+        rarity: ocrCard.rarity || null,
+        set: { id: "Energy" },
+        category: "Energy",
+        energyType: "Normal"
+      }
+    };
+  }
+
   const cardId = convertSetInfoToCardId(ocrCard.setInfo);
   if (!cardId) return { error: "setInfoが不正でcardIdが作られへんかった" };
 
@@ -234,8 +254,11 @@ function convertOcrCardToTcgdex(ocrCard, setId) {
   }
 
   if (ocrCard.cardType === "energy") {
-    // 基本/特殊はOCR側にenergyKind等のフィールドが来た時点で対応する（今回のM6データには未使用）
-    return { error: "energyカードのOCR変換は未対応（今後のセットで必要になったら追加する）" };
+    // ここに来るのは特殊エネルギーのみ（基本エネルギーは関数冒頭で処理済み）
+    if (ocrCard.energyKind !== "特殊") {
+      return { error: `energyKind「${ocrCard.energyKind}」が変換表に無い` };
+    }
+    return { card: { ...base, category: "Energy", energyType: "Special" } };
   }
 
   return { error: `cardType「${ocrCard.cardType}」が変換表に無い` };
