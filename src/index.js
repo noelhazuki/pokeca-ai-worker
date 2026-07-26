@@ -161,6 +161,87 @@ function extractSetCodeForKnownList(category, item) {
 }
 // ▲ 既知手動判定setCode
 
+// ▼ OCR→TCGdex形式 変換表 (register_manual_cardset専用)
+// 日本限定パック（TCGdex未収録）をOCRで読み取ったJSONを、TCGdex形式に寄せるための変換表。
+// 2026-07-26確定：弱点欄でひらがな表記のブレが見つかったが、OCR側の読み取りルールを直す方針にしたため、
+// ここは漢字表記のみで持つ（ひらがな救済は入れない）。
+const OCR_CONVERSION_TABLE = {
+  evolutionStage: {
+    "たね": "Basic",
+    "1進化": "Stage1",
+    "2進化": "Stage2"
+  },
+  pokeType: {
+    "草": "Grass",
+    "炎": "Fire",
+    "水": "Water",
+    "雷": "Lightning",
+    "超": "Psychic",
+    "闘": "Fighting",
+    "悪": "Darkness",
+    "鋼": "Metal",
+    "竜": "Dragon",
+    "無色": "Colorless"
+  },
+  trainerKind: {
+    "グッズ": "Item",
+    "サポート": "Supporter",
+    "スタジアム": "Stadium",
+    "どうぐ": "Tool"
+  }
+};
+// ▲ OCR→TCGdex形式 変換表
+
+// ▼ OCRカード1件→TCGdex形式カードデータ変換 (register_manual_cardset専用)
+// getCardData（遅延キャッシュ）が返す形式に寄せる。validateRegulationLegality・validateDeckRulesが
+// 参照するフィールド（name / regulationMark / stage / energyType）だけは必ず揃える。
+// 変換表に無い値が来た場合はnullを返し、呼び出し側でスキップ扱いにする（黙って適当な値を入れない）。
+function convertOcrCardToTcgdex(ocrCard, setId) {
+  const cardId = convertSetInfoToCardId(ocrCard.setInfo);
+  if (!cardId) return { error: "setInfoが不正でcardIdが作られへんかった" };
+
+  const base = {
+    id: cardId,
+    name: ocrCard.name,
+    regulationMark: ocrCard.regulationMark || null,
+    rarity: ocrCard.rarity || null,
+    set: { id: setId }
+  };
+
+  if (ocrCard.cardType === "pokemon") {
+    const stage = OCR_CONVERSION_TABLE.evolutionStage[ocrCard.evolutionStage];
+    const type = OCR_CONVERSION_TABLE.pokeType[ocrCard.pokeType];
+    if (!stage) return { error: `evolutionStage「${ocrCard.evolutionStage}」が変換表に無い` };
+    if (!type) return { error: `pokeType「${ocrCard.pokeType}」が変換表に無い` };
+    return {
+      card: {
+        ...base,
+        category: "Pokemon",
+        stage,
+        types: [type],
+        hp: ocrCard.hp ? Number(ocrCard.hp) : null,
+        retreat: ocrCard.retreatCost != null ? Number(ocrCard.retreatCost) : null
+      }
+    };
+  }
+
+  if (ocrCard.cardType === "trainer") {
+    const trainerType = OCR_CONVERSION_TABLE.trainerKind[ocrCard.trainerKind];
+    if (!trainerType) return { error: `trainerKind「${ocrCard.trainerKind}」が変換表に無い` };
+    return {
+      card: { ...base, category: "Trainer", trainerType }
+    };
+  }
+
+  if (ocrCard.cardType === "energy") {
+    // 基本/特殊はOCR側にenergyKind等のフィールドが来た時点で対応する（今回のM6データには未使用）
+    return { error: "energyカードのOCR変換は未対応（今後のセットで必要になったら追加する）" };
+  }
+
+  return { error: `cardType「${ocrCard.cardType}」が変換表に無い` };
+}
+// ▲ OCRカード1件→TCGdex形式カードデータ変換
+
 // ▼ setInfo→TCGdex id変換 (resolve_card_id専用)
 // 例：「SV11W 043/086」→スペースをハイフンに置換→「/」より前だけ取る→「SV11W-043」
 function convertSetInfoToCardId(setInfo) {
@@ -1553,6 +1634,57 @@ if (url.searchParams.get("copy_mine") === "true") {
       );
     }
     // ▲ カード詳細取得 (get_card)
+
+    // ▼ 手動カードセット登録 (register_manual_cardset) ※日本限定パック先回り登録用
+    // TCGdexにまだ収録されてへん日本限定パックを、OCRで読み取ったJSONから変換して
+    // card:{cardId}に先回りで書き込む。get_cardの遅延キャッシュがこれをそのまま拾うので、
+    // 既存のレギュ判定・deckRules判定は一切変更せずそのまま使い回せる。
+    // 上書きポリシー：常に上書き（TCGdex側が追いついてきた後の扱いは別途検討・保留中）
+    if (url.searchParams.get("register_manual_cardset") === "true") {
+      if (request.method !== "POST") {
+        return new Response(
+          JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+          { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+
+      const body = await request.json();
+      const { setId, cards } = body;
+
+      if (!setId || !Array.isArray(cards) || cards.length === 0) {
+        return new Response(
+          JSON.stringify({ ok: false, error: "setId/cards（配列・1件以上）は必須やで" }),
+          { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+
+      const saved = [];
+      const skipped = [];
+
+      for (const ocrCard of cards) {
+        const result = convertOcrCardToTcgdex(ocrCard, setId);
+        if (result.error) {
+          skipped.push({ name: ocrCard.name, setInfo: ocrCard.setInfo, reason: result.error });
+          continue;
+        }
+        const cacheKey = "card:" + result.card.id;
+        await env.KV.put(cacheKey, JSON.stringify(result.card));
+        saved.push(result.card.id);
+      }
+
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          setId,
+          savedCount: saved.length,
+          saved,
+          skippedCount: skipped.length,
+          skipped
+        }),
+        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
+    }
+    // ▲ 手動カードセット登録 (register_manual_cardset)
 
 // ▼ setInfo→TCGdex id変換テスト (resolve_card_id) ※動作確認用、register_meta本体への組み込みは次ステップ
 const resolveSetInfo = url.searchParams.get("resolve_card_id");
