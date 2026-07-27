@@ -308,6 +308,7 @@ function convertOcrCardToTcgdex(ocrCard, setId) {
         types: [type],
         hp: ocrCard.hp ? Number(ocrCard.hp) : null,
         retreat: ocrCard.retreatCost != null ? Number(ocrCard.retreatCost) : null,
+        description: ocrCard.flavorText || null,
         abilities,
         attacks,
         weaknesses: weakness ? [weakness] : [],
