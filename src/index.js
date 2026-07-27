@@ -389,10 +389,10 @@ async function resolveCardList(pokeka2Data, env) {
       const { card } = candidateId ? await getCardData(env, candidateId) : { card: null };
 
       if (card) {
-        cardList[internalCategory].push({ cardId: candidateId, count: item.count });
+        cardList[internalCategory].push({ cardId: candidateId, count: item.count, imageUrl: item.imageUrl || null });
       } else {
         // 再照合用にsetInfo（元の公式カード番号表記）も保持しておく（recheck_provisionalで使用）
-        const entry = { provisional: true, tempName: item.name, count: item.count, setInfo: item.setInfo || null };
+        const entry = { provisional: true, tempName: item.name, count: item.count, setInfo: item.setInfo || null, imageUrl: item.imageUrl || null };
         // 既知の「恒久的にTCGdex未収録」setCode（プロモ等）なら、最初からmanual扱いにする
         const knownCode = extractSetCodeForKnownList("pokemon", item);
         if (knownCode && knownManualSetCodes[knownCode]) entry.awaitStatus = "manual";
@@ -402,10 +402,10 @@ async function resolveCardList(pokeka2Data, env) {
       const cardId = await matchTrainerOrEnergyCard(item, env);
 
       if (cardId) {
-        cardList[internalCategory].push({ cardId, count: item.count });
+        cardList[internalCategory].push({ cardId, count: item.count, imageUrl: item.imageUrl || null });
       } else {
         // 再照合用にsetCode（元の画像パス由来コード）も保持しておく（recheck_provisionalで使用）
-        const entry = { provisional: true, tempName: item.name, count: item.count, setCode: item.setCode || null };
+        const entry = { provisional: true, tempName: item.name, count: item.count, setCode: item.setCode || null, imageUrl: item.imageUrl || null };
         const knownCode = extractSetCodeForKnownList(internalCategory, item);
         if (knownCode && knownManualSetCodes[knownCode]) entry.awaitStatus = "manual";
         cardList[internalCategory].push(entry);
