@@ -160,6 +160,24 @@ function summarizeCardListCounts(cardList) {
 }
 // ▲ 一覧用カード枚数集計ヘルパー
 
+// ▼ 一覧用サムネイルURL抽出ヘルパー (list_meta用・2026-07-28追加)
+// coverImageUrlが指定されていればそれを優先、無ければcardList内で最初に見つかった画像を使う。
+// pokemon以外・provisionalエントリー（imageUrlがnullなことが多い）も含めて走査し、
+// 見つかった最初の1件だけ返す（一覧の箱1個につき画像1枚あれば十分なため）。
+function pickThumbUrl(cardList, coverImageUrl) {
+  if (coverImageUrl) return coverImageUrl;
+  if (!cardList) return null;
+  for (const category of CARD_LIST_CATEGORIES) {
+    const entries = cardList[category];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (entry && entry.imageUrl) return entry.imageUrl;
+    }
+  }
+  return null;
+}
+// ▲ 一覧用サムネイルURL抽出ヘルパー
+
 // ▼ 既知手動判定setCode (register_known_manual_setcode / resolve_cardlist / recheck_mine 共通)
 // プロモ等、TCGdexに恒久的に載らへんと人間が一度判断したsetCode（ポケモンはsetInfoの
 // 前半部分＝スペースより前、トレーナーズ・エネはsetCodeそのもの）を覚えておくためのKV。
@@ -1178,6 +1196,54 @@ if (url.searchParams.get("update_meta_howtoplay") === "true") {
   );
 }
 // ▲ 環境デッキ 回し方メモ更新 (update_meta_howtoplay)
+
+// ▼ 環境デッキ 表紙更新 (update_meta_cover) ※coverColor/coverImageUrlのみ書き換え、cardList等は不可
+// update_meta_howtoplayと同じ考え方：フル編集(update_meta)は不採用のまま、表紙関連の2項目だけを
+// 狭く更新できる専用エンドポイントとして新設（2026-07-28・旦那さん向け画面で表紙表示に対応するため）。
+if (url.searchParams.get("update_meta_cover") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { id } = body;
+
+  if (!id) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "idは必須やで" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+  if (!("coverColor" in body) && !("coverImageUrl" in body)) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "coverColorかcoverImageUrlのどっちかは送ってな" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const key = "deck:meta:" + id;
+  const raw = await env.KV.get(key);
+  if (!raw) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `"${key}" が見つからんかったで` }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const deck = JSON.parse(raw);
+  if ("coverColor" in body) deck.coverColor = body.coverColor;
+  if ("coverImageUrl" in body) deck.coverImageUrl = body.coverImageUrl;
+
+  await env.KV.put(key, JSON.stringify(deck));
+  return new Response(
+    JSON.stringify({ ok: true, saved: key, coverColor: deck.coverColor, coverImageUrl: deck.coverImageUrl }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ 環境デッキ 表紙更新 (update_meta_cover)
   // ▼ 環境デッキ 回し方メモ取得 (get_meta_howtoplay) ※編集パネル表示用の単体取得
 const getMetaHowToPlayId = url.searchParams.get("get_meta_howtoplay");
 if (getMetaHowToPlayId) {
@@ -1704,17 +1770,27 @@ if (url.searchParams.get("copy_mine") === "true") {
       const decks = raws
         .filter((raw) => raw !== null) // 削除直後のKV反映ラグ対策
         .map((raw) => {
-          const { id, name, deckCode, howToPlay, cardList } = JSON.parse(raw);
-          // totalCount/provisionalCount：旦那さん向け一覧画面のタグ表示用（2026-07-28追加）。
-          // cardList自体は返さず、集計値だけ乗せる（軽量一覧の方針は維持）。
+          const { id, name, deckCode, howToPlay, cardList, coverColor, coverImageUrl } = JSON.parse(raw);
+          // totalCount/provisionalCount/thumbUrl/pokemonCardIds：旦那さん向け一覧画面の
+          // 表紙・タグ・自動色判定用（2026-07-28追加）。cardList自体は返さず、
+          // 集計値・代表画像URL1枚・ポケモンcardId（重複除去・上限10件）だけ乗せる（軽量一覧の方針は維持）。
           const counts = summarizeCardListCounts(cardList);
+          const pokemonCardIds = [...new Set(
+            (cardList?.pokemon || [])
+              .filter((e) => e && !e.provisional && e.cardId)
+              .map((e) => e.cardId)
+          )].slice(0, 10);
           return {
             id,
             name,
             deckCode: deckCode || "",
             howToPlay: howToPlay || "",
             totalCount: counts.total,
-            provisionalCount: counts.provisional
+            provisionalCount: counts.provisional,
+            thumbUrl: pickThumbUrl(cardList, coverImageUrl),
+            coverColor: coverColor !== undefined ? coverColor : null,
+            coverImageUrl: coverImageUrl || null,
+            pokemonCardIds
           };
         });
       return new Response(
