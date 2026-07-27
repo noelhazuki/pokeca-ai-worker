@@ -192,10 +192,53 @@ const OCR_CONVERSION_TABLE = {
 };
 // ▲ OCR→TCGdex形式 変換表
 
+// ▼ OCRタイプ1文字変換表 (register_manual_cardset専用・moves[].cost/weakness/resistance用)
+// pokeTypeとは別テーブル。moves[].costは「超超」のように1文字を並べた文字列、
+// weakness/resistanceは「闘×2」のように1文字＋倍率/軽減値をくっつけた文字列で来る想定（2026-07-27確定）。
+// 無色だけpokeTypeでは「無色」（2文字）だが、1文字表記では「無」を使う。
+const ENERGY_CHAR_TABLE = {
+  "草": "Grass",
+  "炎": "Fire",
+  "水": "Water",
+  "雷": "Lightning",
+  "超": "Psychic",
+  "闘": "Fighting",
+  "悪": "Darkness",
+  "鋼": "Metal",
+  "竜": "Dragon",
+  "無": "Colorless"
+};
+// ▲ OCRタイプ1文字変換表
+
+// ▼ moves[].cost文字列→TCGdex cost配列変換 (register_manual_cardset専用)
+// 「超超」のように1文字ずつ並んだ文字列を、1文字ごとにENERGY_CHAR_TABLEで変換する。
+// これはモーダル表示専用の項目（レギュ判定・deckRules判定には使わない）なので、
+// 変換できない文字があっても黙ってその文字だけ飛ばす（カード全体は登録を続ける）。
+function convertCostString(costStr) {
+  if (typeof costStr !== "string" || costStr.trim() === "") return [];
+  return costStr.trim().split("").map(ch => ENERGY_CHAR_TABLE[ch]).filter(Boolean);
+}
+// ▲ moves[].cost文字列→TCGdex cost配列変換
+
+// ▼ weakness/resistance文字列→{type, value}変換 (register_manual_cardset専用)
+// 「闘×2」「鋼-20」のように、先頭1文字がタイプ・残りが倍率/軽減値という形式を想定（2026-07-27確定）。
+// これもモーダル表示専用の項目。先頭文字が変換表に無ければnullを返し、呼び出し側でその項目だけ空にする。
+function convertWeaknessOrResistance(str) {
+  if (typeof str !== "string" || str.trim() === "") return null;
+  const t = str.trim();
+  const type = ENERGY_CHAR_TABLE[t.charAt(0)];
+  if (!type) return null;
+  const value = t.slice(1).trim() || null;
+  return { type, value };
+}
+// ▲ weakness/resistance文字列→{type, value}変換
+
 // ▼ OCRカード1件→TCGdex形式カードデータ変換 (register_manual_cardset専用)
 // getCardData（遅延キャッシュ）が返す形式に寄せる。validateRegulationLegality・validateDeckRulesが
 // 参照するフィールド（name / regulationMark / stage / energyType）だけは必ず揃える。
-// 変換表に無い値が来た場合はnullを返し、呼び出し側でスキップ扱いにする（黙って適当な値を入れない）。
+// このフィールドが変換表に無い値だと、カードそのものを登録スキップする（黙って適当な値を入れない）。
+// 一方、abilities/attacks/weaknesses/resistances/illustratorはモーダル表示専用でルール判定に無関係なため、
+// 個々の値が変換できなくてもその項目だけ空にして、カード自体の登録は続ける（2026-07-27確定）。
 function convertOcrCardToTcgdex(ocrCard, setId) {
   // 基本エネルギーだけ先に特殊処理する。基本エネルギーは実物のカードにsetInfo（カード番号）が
   // 印刷されておらず、代わりに略号（LIG等）のみが入っている。また、同じ働きの基本エネルギーが
@@ -210,6 +253,7 @@ function convertOcrCardToTcgdex(ocrCard, setId) {
         name: ocrCard.name,
         regulationMark: null,
         rarity: ocrCard.rarity || null,
+        illustrator: ocrCard.illustrator || null,
         set: { id: "Energy" },
         category: "Energy",
         energyType: "Normal"
@@ -225,6 +269,7 @@ function convertOcrCardToTcgdex(ocrCard, setId) {
     name: ocrCard.name,
     regulationMark: ocrCard.regulationMark || null,
     rarity: ocrCard.rarity || null,
+    illustrator: ocrCard.illustrator || null,
     set: { id: setId }
   };
 
@@ -233,6 +278,28 @@ function convertOcrCardToTcgdex(ocrCard, setId) {
     const type = OCR_CONVERSION_TABLE.pokeType[ocrCard.pokeType];
     if (!stage) return { error: `evolutionStage「${ocrCard.evolutionStage}」が変換表に無い` };
     if (!type) return { error: `pokeType「${ocrCard.pokeType}」が変換表に無い` };
+
+    // 特性：{name, text} または null。TCGdexのabilities配列形式（type/name/effect）に寄せる
+    const abilities = ocrCard.ability && ocrCard.ability.name
+      ? [{ type: "Ability", name: ocrCard.ability.name, effect: ocrCard.ability.text || "" }]
+      : [];
+
+    // ワザ：moves配列。costは1文字ずつ変換、変換できない文字は黙って飛ばす
+    const attacks = Array.isArray(ocrCard.moves)
+      ? ocrCard.moves.map(mv => {
+          const atk = { name: mv.name || "" };
+          const cost = convertCostString(mv.cost);
+          if (cost.length) atk.cost = cost;
+          if (mv.damage) atk.damage = mv.damage;
+          if (mv.text) atk.effect = mv.text;
+          return atk;
+        })
+      : [];
+
+    // 弱点・抵抗力：「闘×2」形式の文字列を分解。変換できなければその項目だけ空にする
+    const weakness = convertWeaknessOrResistance(ocrCard.weakness);
+    const resistance = convertWeaknessOrResistance(ocrCard.resistance);
+
     return {
       card: {
         ...base,
@@ -240,7 +307,11 @@ function convertOcrCardToTcgdex(ocrCard, setId) {
         stage,
         types: [type],
         hp: ocrCard.hp ? Number(ocrCard.hp) : null,
-        retreat: ocrCard.retreatCost != null ? Number(ocrCard.retreatCost) : null
+        retreat: ocrCard.retreatCost != null ? Number(ocrCard.retreatCost) : null,
+        abilities,
+        attacks,
+        weaknesses: weakness ? [weakness] : [],
+        resistances: resistance ? [resistance] : []
       }
     };
   }
@@ -249,7 +320,7 @@ function convertOcrCardToTcgdex(ocrCard, setId) {
     const trainerType = OCR_CONVERSION_TABLE.trainerKind[ocrCard.trainerKind];
     if (!trainerType) return { error: `trainerKind「${ocrCard.trainerKind}」が変換表に無い` };
     return {
-      card: { ...base, category: "Trainer", trainerType }
+      card: { ...base, category: "Trainer", trainerType, effect: ocrCard.text || null }
     };
   }
 
@@ -258,7 +329,7 @@ function convertOcrCardToTcgdex(ocrCard, setId) {
     if (ocrCard.energyKind !== "特殊") {
       return { error: `energyKind「${ocrCard.energyKind}」が変換表に無い` };
     }
-    return { card: { ...base, category: "Energy", energyType: "Special" } };
+    return { card: { ...base, category: "Energy", energyType: "Special", effect: ocrCard.text || null } };
   }
 
   return { error: `cardType「${ocrCard.cardType}」が変換表に無い` };
