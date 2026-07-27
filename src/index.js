@@ -1190,7 +1190,7 @@ if (url.searchParams.get("update_mine") === "true") {
   }
 
   // 送られてきた項目だけ上書き（キーが存在するかどうかで判定）
-  const updatable = ["name", "cardList", "concern", "deckCode", "locked", "coverImageUrl"];
+  const updatable = ["name", "cardList", "concern", "deckCode", "locked", "coverImageUrl", "coverColor"];
   const merged = { ...existing };
   for (const field of updatable) {
     if (field in body) {
