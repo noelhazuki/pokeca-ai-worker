@@ -139,6 +139,21 @@ function findProvisionalEntry(cardList, category, tempName, setInfo, pid) {
 }
 // ▲ provisional対象特定ヘルパー
 
+// ▼ provisional有無フラグ判定ヘルパー (list_meta用・2026-07-28追加)
+// list_metaは軽量一覧のためcardList本体は返さないが、旦那さん向け画面の🔨アイコン表示のために
+// 「未確定カードが1件でもあるか」だけをboolで返す。cardListはこの時点で既にJSON.parse済みのため
+// 追加のKVアクセスは発生しない（メモリ上のオブジェクトを走査するだけ）。
+function hasProvisionalEntries(cardList) {
+  if (!cardList) return false;
+  for (const category of CARD_LIST_CATEGORIES) {
+    const entries = cardList[category];
+    if (!Array.isArray(entries)) continue;
+    if (entries.some((entry) => entry && entry.provisional === true)) return true;
+  }
+  return false;
+}
+// ▲ provisional有無フラグ判定ヘルパー
+
 // ▼ 既知手動判定setCode (register_known_manual_setcode / resolve_cardlist / recheck_mine 共通)
 // プロモ等、TCGdexに恒久的に載らへんと人間が一度判断したsetCode（ポケモンはsetInfoの
 // 前半部分＝スペースより前、トレーナーズ・エネはsetCodeそのもの）を覚えておくためのKV。
@@ -1683,8 +1698,16 @@ if (url.searchParams.get("copy_mine") === "true") {
       const decks = raws
         .filter((raw) => raw !== null) // 削除直後のKV反映ラグ対策
         .map((raw) => {
-          const { id, name, deckCode } = JSON.parse(raw);
-          return { id, name, deckCode: deckCode || "" };
+          const { id, name, deckCode, howToPlay, cardList } = JSON.parse(raw);
+          // hasProvisional：旦那さん向け一覧画面の🔨アイコン表示用（2026-07-28追加）。
+          // cardList自体は返さず、有無フラグだけ計算して乗せる（軽量一覧の方針は維持）。
+          return {
+            id,
+            name,
+            deckCode: deckCode || "",
+            howToPlay: howToPlay || "",
+            hasProvisional: hasProvisionalEntries(cardList)
+          };
         });
       return new Response(
         JSON.stringify({ ok: true, decks }),
