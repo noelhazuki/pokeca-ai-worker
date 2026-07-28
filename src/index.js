@@ -1763,13 +1763,22 @@ if (url.searchParams.get("copy_mine") === "true") {
     ? (source.howToPlay ? `[元メタの回し方] ${source.howToPlay}` : "")
     : (source.concern || "");
 
+  // sourceMetaId：どの環境デッキ(meta)由来のコピーかを追跡するフィールド(2026-07-28追加)。
+  // ?ask=trueの会話セッションはmine単位で持つため、同じmetaに何度🤖ボタンを押しても
+  // このフィールドで既存mineを再利用でき、会話が分裂しないようにするのが目的。
+  // sourceType==="meta"ならそのmetaIdをそのまま、sourceType==="mine"なら元mineの
+  // sourceMetaIdをそのまま引き継ぐ(mineのコピーのコピーでもチェーンが切れないように)。
+  const sourceMetaId = sourceType === "meta" ? sourceId : (source.sourceMetaId || null);
+
   const newDeck = {
     id: newId,
     name: newName,
     cardList: source.cardList,
     concern: concern,
     deckCode: "",
-    locked: false
+    locked: false,
+    sourceMetaId: sourceMetaId,
+    createdAt: new Date().toISOString()
   };
 
   await env.KV.put(newKey, JSON.stringify(newDeck));
