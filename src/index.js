@@ -1262,6 +1262,27 @@ if (getMetaHowToPlayId) {
   );
 }
 // ▲ 環境デッキ 回し方メモ取得 (get_meta_howtoplay)
+
+// ▼ 環境デッキ単体取得（フル） (get_meta_deck) ※詳細画面のカードグリッド表示用
+// list_metaは軽量一覧のためcardListを含まない。デッキ一覧→詳細タップ時に、
+// このエンドポイントでcardList込みの1件だけを取得する（2026-07-28・pokeca_app.html統合のため新設）。
+const getMetaDeckId = url.searchParams.get("get_meta_deck");
+if (getMetaDeckId) {
+  const key = "deck:meta:" + getMetaDeckId;
+  const raw = await env.KV.get(key);
+  if (!raw) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `"${key}" が見つからんかったで` }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+  const deck = JSON.parse(raw);
+  return new Response(
+    JSON.stringify({ ok: true, deck }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ 環境デッキ単体取得（フル） (get_meta_deck)
 // ▼ 自分のデッキ登録 (register_mine)
     if (url.searchParams.get("register_mine") === "true") {
       if (request.method !== "POST") {
