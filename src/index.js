@@ -746,6 +746,14 @@ async function generateCopyName(env, sourceName, type) {
 // 進化段階の英語stage値→日本語表記変換（TCGdexの表記に合わせる。未知の値はそのまま素通し）
 const STAGE_LABELS = { Basic: "たね", Stage1: "1進化", Stage2: "2進化" };
 
+// ▼ typeコード→日本語ラベル変換表 (ask機能のプロンプト用。pokeca_app2.htmlのTYPE_COLORSと対応を合わせてある)
+const TYPE_LABELS_JA = {
+  Grass: "草", Fire: "炎", Water: "水", Lightning: "雷", Psychic: "超",
+  Fighting: "闘", Darkness: "悪", Metal: "鋼", Fairy: "フェアリー",
+  Dragon: "ドラゴン", Colorless: "無色"
+};
+// ▲ typeコード→日本語ラベル変換表
+
 function buildPokemonDetail(card) {
   const parts = [];
   if (card.stage) {
@@ -753,7 +761,9 @@ function buildPokemonDetail(card) {
     parts.push(card.evolveFrom ? `${stageLabel}（${card.evolveFrom}から進化）` : stageLabel);
   }
   if (card.hp) parts.push(`HP${card.hp}`);
-  if (Array.isArray(card.types) && card.types.length) parts.push(`タイプ:${card.types.join("/")}`);
+  if (Array.isArray(card.types) && card.types.length) {
+    parts.push(`タイプ:${card.types.map(t => TYPE_LABELS_JA[t] || t).join("/")}`);
+  }
   if (Array.isArray(card.abilities) && card.abilities.length) {
     for (const ab of card.abilities) {
       parts.push(`特性「${ab.name}」:${ab.effect}`);
@@ -761,8 +771,14 @@ function buildPokemonDetail(card) {
   }
   if (Array.isArray(card.attacks) && card.attacks.length) {
     for (const atk of card.attacks) {
+      // わざの消費エネルギー(cost)：2026-07-29追加。これが抜けていたため、
+      // AIが「ポケモンのタイプ＝そのわざの必要エネルギー」と誤認し、複数色コストの
+      // わざ（例：水/超/闘の3色）を単色で足りると誤答する事故があった。
+      const costLabel = Array.isArray(atk.cost) && atk.cost.length
+        ? `[${atk.cost.map(c => TYPE_LABELS_JA[c] || c).join("")}]`
+        : "";
       const dmg = atk.damage ? `${atk.damage}ダメージ` : "";
-      parts.push(`わざ「${atk.name}」${dmg}${atk.effect ? "：" + atk.effect : ""}`);
+      parts.push(`わざ「${atk.name}」${costLabel}${dmg}${atk.effect ? "：" + atk.effect : ""}`);
     }
   }
   return parts.join("、");
