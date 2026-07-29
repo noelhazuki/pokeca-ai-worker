@@ -787,6 +787,9 @@ function buildPokemonDetail(card) {
 
 // ▼ ask用ヘルパー：cardList → カード名の一覧テキスト化
 // 2026-07-23変更：ポケモンカードのみHP・タイプ・特性・わざのテキストを付与する（トレーナーズ・エネは名前のみで変更なし）
+// 2026-07-29修正：トレーナーズ・エネが名前のみだったせいで、AIが名前の印象だけで効果を推測して
+// 誤答する事故があった（例：「ロケット団のラムダ」を名前の連想で妨害系カードと誤認）。
+// カードデータのeffectフィールド（TCGdex・OCR登録カード共通）をポケモン以外にも渡すよう修正。
 // provisionalカード（cardId未確定）はtempNameをそのまま使う
 async function buildCardListSummary(cardList, env) {
   const lines = [];
@@ -800,6 +803,8 @@ async function buildCardListSummary(cardList, env) {
         if (category === "pokemon" && card) {
           const detail = buildPokemonDetail(card);
           lines.push(detail ? `${name} ×${item.count}（${detail}）` : `${name} ×${item.count}`);
+        } else if (card && card.effect) {
+          lines.push(`${name} ×${item.count}（${card.effect}）`);
         } else {
           lines.push(`${name} ×${item.count}`);
         }
