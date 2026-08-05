@@ -1218,6 +1218,48 @@ if (url.searchParams.get("update_meta_howtoplay") === "true") {
 }
 // ▲ 環境デッキ 回し方メモ更新 (update_meta_howtoplay)
 
+// ▼ 環境デッキ 名前更新 (update_meta_name) ※nameのみ書き換え、cardList等は不可
+// update_meta_howtoplayと同じ考え方：フル編集(update_meta)は不採用のまま、
+// 名前だけを単独で書き換えられる専用エンドポイントとして追加（2026-08-05）
+if (url.searchParams.get("update_meta_name") === "true") {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ ok: false, error: "POSTで送ってな" }),
+      { status: 405, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const body = await request.json();
+  const { id, name } = body;
+  const trimmedName = typeof name === "string" ? name.trim() : "";
+
+  if (!id || !trimmedName) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "id・nameは両方必須やで（nameは空文字NG）" }),
+      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const key = "deck:meta:" + id;
+  const raw = await env.KV.get(key);
+  if (!raw) {
+    return new Response(
+      JSON.stringify({ ok: false, error: `"${key}" が見つからんかったで` }),
+      { status: 404, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  const deck = JSON.parse(raw);
+  deck.name = trimmedName;
+
+  await env.KV.put(key, JSON.stringify(deck));
+  return new Response(
+    JSON.stringify({ ok: true, saved: key, name: deck.name }),
+    { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+// ▲ 環境デッキ 名前更新 (update_meta_name)
+
 // ▼ 環境デッキ 表紙更新 (update_meta_cover) ※coverColor/coverImageUrlのみ書き換え、cardList等は不可
 // update_meta_howtoplayと同じ考え方：フル編集(update_meta)は不採用のまま、表紙関連の2項目だけを
 // 狭く更新できる専用エンドポイントとして新設（2026-07-28・旦那さん向け画面で表紙表示に対応するため）。
